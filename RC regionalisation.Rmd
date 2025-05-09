@@ -1,0 +1,242 @@
+---
+title: "RC regionalisation"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(geomorph) #for geometric morphometric analysis
+require(ape)
+require(ggplot2)
+require(caper)
+require(MorphoRegions)
+
+```
+
+```{r}
+vertebrae <- readland.tps('Data/Vertebrae.tps',
+                              specID = c("ID"))
+```
+
+```{r Split into Multiple Species}
+
+#Extract species names (Genus_species) note that the index will be preserved for splitting the array
+specimen_names <- dimnames(vertebrae)[[3]]
+species_names <- gsub("^([A-Za-z]+_[A-Za-z]+).*", "\\1", specimen_names)
+
+#find unique Genus_species names
+unique_species <- unique(species_names)
+
+# Initialize a list to store the resulting arrays
+split_arrays <- list()
+
+# Loop over each unique species and extract the data for that species
+for (species in unique_species) {
+  species_indices <- which(species_names == species)
+  split_arrays[[species]] <- vertebrae[, , species_indices]
+}
+
+#split the array into entries for each species
+
+#initialize a list to store the arrays for each species
+species_arrays_list <- list()
+
+#loop over each unique species
+for (species in unique_species) {
+  #extract the corresponding array for each species
+  species_arrays_list[[species]] <- split_arrays[[species]]
+}
+
+# Example species_arrays_list
+# species_arrays_list <- list(Astatotilapia_calliptera = arr_1, Astatotilapia_another_species = arr_2, ...)
+
+# Function to reorder an array based on version numbers in the species names
+reorder_array <- function(arr, species_names) {
+  # Extract version numbers from the species names
+  version_numbers <- as.numeric(gsub(".*_v(\\d+)$", "\\1", species_names))
+  
+  # Get the order of the species based on version numbers in ascending order
+  sorted_order <- order(version_numbers)
+  
+  # Reorder the array based on the sorted order
+  reordered_arr <- arr[, , sorted_order]
+  
+  return(reordered_arr)
+}
+
+# Initialize a new list to store the reordered arrays
+reordered_species_arrays_list <- list()
+
+# Loop over each species in the original list
+for (species in names(species_arrays_list)) {
+  # Get the array for the current species
+  current_arr <- species_arrays_list[[species]]
+  
+  # Get the species names (dimnames)
+  species_names <- dimnames(current_arr)[[3]]
+  
+  # Reorder the current array based on the version numbers
+  reordered_species_arrays_list[[species]] <- reorder_array(current_arr, species_names)
+}
+
+#individual species entries can be accessed like this:
+#reordered_species_arrays_list$Astatotilapia_calliptera
+```
+
+### Rhamphochromis chilingali
+
+```{r}
+#Generalized procrustes analysis to superimose raw coordinate data (Rhamphochromis chilingali)
+rhamphochromis_chilingali <- gpagen(reordered_species_arrays_list$Rhamphochromis_sp
+, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+rhamphochromis_chilingali_proc <- gpagen(reordered_species_arrays_list$Rhamphochromis_sp
+, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+
+#New PCA function
+R_chilingali_PCA <- gm.prcomp(rhamphochromis_chilingali_proc$coords)
+summary(R_chilingali_PCA)
+plot(R_chilingali_PCA, main=" Rhamphochromis chilingali", axis1=1, axis2=2, type="b", pch=19)
+
+
+```
+
+```{r Prepare PCA Data for MorphoRegion (Rhamphochromis chilingali)}
+
+RC_pc_scores <- as.data.frame(R_chilingali_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+RC_pc_scores <- RC_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(RC_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(RC_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Rhamphochromis chilingali)}
+#Process PC data for MorphoRegions
+rhamphochromis_chilingali <- process_measurements(RC_pc_scores, pos = 1)
+rhamphochromis_chilingali_pco <- svdPCO(rhamphochromis_chilingali, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(rhamphochromis_chilingali_pco, 1:5)
+```
+
+```{r Plotting PCOs and Best Fitting Model (Rhamphochromis chilingali)}
+#Plot regressions for best model:
+
+
+rhamphochromis_chilingali_regionresults <- calcregions(rhamphochromis_chilingali_pco, scores = PCOs, noregions = 10,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(rhamphochromis_chilingali_regionresults)
+supp <- modelsupport(models)
+supp
+
+
+plotsegreg(rhamphochromis_chilingali_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "bic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Rhamphochromis chilingali)}
+
+rhamphochromis_chilingali_regionresults <- calcregions(rhamphochromis_chilingali_pco, scores = PCOs, noregions = 10,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(rhamphochromis_chilingali_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+# min 2 vert per region
+
+```{r}
+regionresults <- calcregions(rhamphochromis_chilingali_pco, scores = 1:28, noregions = 7, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 7,
+                   pct = 0.1, criterion = "aic")
+str(bpvar)
+
+
+ggsave("Figures/Regionalisation/RC min2.jpeg", qq, width = 25, height = 15, units = "cm")
+
+qq <- plotvertmap(rhamphochromis_chilingali_pco, name = 'Ramphochromis chilingali',
+            modelsupport = supp, criterion = "aic", model = 1,  bpvar = bpvar) +
+    theme(axis.title.y = element_text(vjust = 0.18)) +
+    scale_y_continuous(limits = c(0, 10)) +
+    scale_x_continuous(position = "bottom")
+qq
+
+mean_bps <- bpvar$WeightedBP["wMean", ]
+sd_bps   <- bpvar$WeightedBP["wSD",  ]
+
+# Pass them using bp and bp.sd directly
+bpvar_fixed <- list(
+  WeightedBP = rbind(wMean = as.numeric(mean_bps),
+                     wSD = as.numeric(sd_bps))
+)
+class(bpvar_fixed) <- "regions_BPvar"
+
+# Try plot with JUST bpvar
+qq <- plotvertmap(rhamphochromis_chilingali_pco,
+                  name = 'Ramphochromis chilingali',
+                  bpvar = bpvar_fixed,
+                  dropNA = TRUE) +
+  theme(axis.title.y = element_text(vjust = 0.18)) +
+  scale_y_continuous(limits = c(0, 10)) +
+  scale_x_continuous(position = "bottom")
+qq
+
+ggsave("Figures/Regionalisation/RC min2 eb.jpeg", qq, width = 25, height = 15, units = "cm")
+
+```
+
+
+min 3 vert per region
+saving and generating figures with error bars
+
+```{r}
+regionresults <- calcregions(rhamphochromis_chilingali_pco, scores = 1:28, noregions = 7, 
+                             minvert = 3, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 7,
+                   pct = 0.1, criterion = "aic")
+
+bpvar
+
+plotvertmap(rhamphochromis_chilingali, name = 'Ramphochromis chilingali',
+            modelsupport = supp, criterion = "aic", model = 1)
+
+Yy <- plotvertmap(rhamphochromis_chilingali_pco, name = 'Ramphochromis chilingali',
+            modelsupport = supp, criterion = "aic", model = 1) +
+    theme(axis.title.y = element_text(vjust = 0.18)) +
+    scale_y_continuous(limits = c(0, 10))+
+    scale_x_continuous(position = "bottom")
+Yy
+
+tx2 <- plotvertmap(rhamphochromis_chilingali_pco, name = 'Ramphochromis chilingali',
+                  model = 1,  modelsupport = supp,  bp.sd = c( 0.347, 0.028,0 ,0, 0 ,0) +
+    theme(axis.title.y = element_text(vjust = 0.18)) +
+    scale_y_continuous(limits = c(0, 10)) +
+    scale_x_continuous(position = "bottom"))
+    
+tx2
+
+ggsave("Figures/Regionalisation/RC min3 eb.jpeg", tx2, width = 25, height = 15, units = "cm")
+ggsave("Figures/Regionalisation/RC min3.jpeg", Yy, width = 25, height = 15, units = "cm")
+```
+
