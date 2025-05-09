@@ -1,0 +1,809 @@
+---
+title: "Precaudal Vertebrae Shape Analysis"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(geomorph) #for geometric morphometric analysis
+require(ape)
+require(ggplot2)
+require(caper)
+```
+
+```{r Import Data}
+
+precaudal <- readland.tps("Data/precaudal.tps",
+                              specID = c("ID"), readcurves = TRUE)
+
+#drop Chindongo elongatus (broken neural spines)
+precaudal <- precaudal[, , !grepl("Chindongo_elongatus_", dimnames(precaudal)[[3]]), drop = FALSE]
+
+#drop hybrids
+precaudal <- precaudal[, , !grepl("M_zebra_", dimnames(precaudal)[[3]]), drop = FALSE]
+
+#import species data for specimens
+species_data <- read.csv('Data/species_data.csv')
+```
+
+## Precaudal Vertebrae (Procrustes Distances)
+
+```{r Procrustes Superimposition on Precaudal Vertebrae (ProcD)}
+
+#define the sliding landmarks (i.e. for rib-curvature)
+#define sliding landmarks (18 to 27) with fixed landmarks at 16 and 17 -- remember we have redefined 27 (in the original landmark scheme as the tip of the rib as landmark 17 as it is fixed)
+num_sliders <- 10  # Since sliding landmarks are 18 to 27
+precaudal_sliders <- matrix(NA, nrow = num_sliders, ncol = 3)
+
+for (i in 1:num_sliders) {
+  precaudal_sliders[i, ] <- c(17 + i, 17 + i - 1, 17 + i + 1)
+}
+
+#manually adjust first and last row of the matrix:
+precaudal_sliders[1, ] <- c(18, 16, 19)
+precaudal_sliders[10, ] <- c(27, 26, 17)
+
+#general procrustes superimposition on all caudal coordinates
+gpa_precaudal_procd <- gpagen(precaudal, curves = precaudal_sliders, max.iter = 100, ProcD = TRUE)
+#minimising procrustes distances between semilandmarks (Rolfe 2010) 
+
+#extract specimen IDs
+specimen_ids <- dimnames(gpa_precaudal_procd$coords)[[3]]  #extract specimen names
+species <- gsub("(^[A-Za-z]+_[a-z]+).*", "\\1", specimen_ids)  #extract Genus_species
+
+#filter for unique species
+unique_species <- unique(species)
+
+#create an empty array to store species mean shapes
+species_means_procd <- array(NA, dim = c(dim(gpa_precaudal_procd$coords)[1], dim(gpa_precaudal_procd$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape
+for (i in seq_along(unique_species)) {
+  species_means_procd[,,i] <- mshape(gpa_precaudal_procd$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means_procd)[[3]] <- unique_species
+```
+
+```{r Plot all Aligned Precaudal Landmarks (Precaudal - ProcD)}
+#this should pop-up a 3D plot of all of the aligned coordinates in X,Y,Z space
+plotAllSpecimens(gpa_precaudal_procd$coords, mean=TRUE, label=TRUE, plot_param = list(mean.col='red', txt.cex=2.00, txt.adj=5.00, txt.col='red'))
+```
+
+```{r Prune Tree and Reorder Data}
+
+#define the full tree
+tree <- read.tree(file='Data/Trees/phylogenies_mcgee_2020/phylogeny_mcgee_2020.tre')
+
+#remove _ from tip labels
+tree$tip.label <- gsub("_", " ", tree$tip.label)
+
+#replace underscores with spaces to match tree tip labels 
+dimnames(species_means_procd)[[3]] <- gsub("_", " ", dimnames(species_means_procd)[[3]])
+
+#extract species names
+tips_to_keep <- dimnames(species_means_procd)[[3]]
+
+#prune tree to tips present within data:
+pruned_tree <- keep.tip(tree, intersect(tree$tip.label, tips_to_keep))
+
+#reorder species_means_procd array to match that of phylogeny
+ordered_tips <- pruned_tree$tip.label
+
+#extract the current species order from the array
+current_order <- dimnames(species_means_procd)[[3]]
+
+#create a reordering index
+reorder_index <- match(ordered_tips, current_order)
+
+#reorder the array along the third dimension
+species_means_procd <- species_means_procd[ , , reorder_index]
+
+#ipdate dimnames to match the new order
+dimnames(species_means_procd)[[3]] <- ordered_tips
+```
+
+```{r Filter Species Data}
+
+#since we already have a pruned tree:
+species_data_filtered <- subset(species_data, species_name %in% pruned_tree$tip.label)
+
+#note not all species will be represented, we have shape data for some deep benthics that I didn't initially have count data for.
+```
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates}
+
+#perform PCA on species means 
+pca_precaudal_procd <- gm.prcomp(species_means_procd, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_precaudal_procd)
+```
+
+```{r Assemble PC Score Dataframe}
+
+#reorder dataframe to match the tips of the phylogeny
+species_data_filtered <- species_data_filtered[match(pruned_tree$tip.label, species_data_filtered$species_name), ]
+
+#append the PC scores to the ecomorphological data
+species_data_filtered <- 
+  species_data_filtered %>%
+  mutate(PC1 = pca_precaudal_procd$x[,1],
+         PC2 = pca_precaudal_procd$x[,2],
+         PC3 = pca_precaudal_procd$x[,3],
+         PC4 = pca_precaudal_procd$x[,4],
+         PC5 = pca_precaudal_procd$x[,5]) #takes us to ~80% of cumulative variance
+```
+
+```{r Define Function to Extract Most Influential Coordinates}
+#function will identify and extract the top ten coordinates (X,Y,Z), and associated landmarks (1-27), contributing to each defined PC.
+extract_top_contributors <- function(pca_object, num_pcs = 4, top_n = 10) {
+  #define number of landmarks and coordinate system
+  num_landmarks <- 27  #27 for precaudal
+  num_coords <- 3  #X,Y,Z
+  
+  #generate landmark and coordinate mapping
+  landmark_indices <- rep(1:num_landmarks, each = num_coords)
+  coordinates <- rep(c("X", "Y", "Z"), times = num_landmarks)
+  
+  #initialize a list to store results
+  results <- list()
+  
+  for (pc in 1:num_pcs) {
+    #extract loadings for the current PC
+    pc_loadings <- pca_object$rotation[, pc]
+    abs_pc_loadings <- abs(pc_loadings) #using absolute to capture both positive and negative loadings 
+    
+    #sort by order of magnitude (regardless of +ve or -ve loading)
+    sorted_indices <- order(abs_pc_loadings, decreasing = TRUE)
+    
+    #extract top coordinates according to absolute loading, number is defined above (top_n) 
+    top_contributors <- sorted_indices[1:top_n]
+    
+    #assemble results into a dataframe for easy view
+    pc_df <- data.frame(
+      PC = rep(pc, top_n),
+      landmark = landmark_indices[top_contributors],
+      coordinate = coordinates[top_contributors],
+      loading = pc_loadings[top_contributors],
+      absolute_loading = abs_pc_loadings[top_contributors]
+    )
+    
+    # Store in results list
+    results[[paste0("PC", pc)]] <- pc_df
+  }
+  
+  #combine into a single dataframe
+  final_df <- do.call(rbind, results)
+  return(final_df)
+}
+
+```
+
+```{r Extract Influential Landmarks/Coordaintes (PC1-PC4)}
+#extract the most influential coordinates/landmarks for PC1:PC4 (collectively explains ~80% of variation)
+top_landmarks <- extract_top_contributors(pca_precaudal_procd, num_pcs = 4, top_n = 10)
+
+#convert dataframe to a list of lists
+top_landmarks_list <- split(top_landmarks, top_landmarks$PC)
+names(top_landmarks_list) <- paste0("PC", names(top_landmarks_list))
+
+#access lists
+top_landmarks_list$PC1
+top_landmarks_list$PC2 
+top_landmarks_list$PC3
+top_landmarks_list$PC4#etc.
+```
+
+```{r Plot Highest PC1 species against Mean}
+#calculate mean shape for all species
+mean_shape <- mshape(gpa_precaudal_procd$coords)
+
+#extract mean precaudal coordinates for L. gossei (loads most positively on PC1)
+species_coordinates <- species_means_procd[, , 'Lethrinops gossei']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("red")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Lethrinops gossei together
+plotRefToTarget(mean_shape, species_coordinates, method = 'vector', mag = 2.00, gridPars = gP,
+               label = TRUE, axes=TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Lowest PC1 species against Mean}
+#extract mean precaudal coordinates for L. gossei (loads most negatively on PC1)
+species_coordinates <- species_means_procd[, , 'Rhamphochromis woodi']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("blue")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Nimbochromis livingstonii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Calculate Residuals for Body Aspect Ratio}
+
+##we are going to fit an intercept only model (y~1) to account for variation in body aspect ratio due to shared ancestry. I can then correlate the residuals for body aspect ratio (ln[length]-ln[Width]) against PC1.
+
+#create a comparative data object in caper (i.e. vcv matrix)
+comp_data <- comparative.data(pruned_tree, species_data_filtered, species_name, vcv=TRUE)
+
+#fit the PGLS intercept only model and estimate lambda via ML
+ln_length_ln_width_intercept_only_pgls <- pgls(ln_length_ln_width ~ 1, comp_data, lambda="ML")
+
+#extract residuals for ln[Length]-ln[Width]
+ln_length_ln_width_residuals <- ln_length_ln_width_intercept_only_pgls$residuals
+
+#add to species_data_filtered dataframe
+species_data_filtered <- species_data_filtered %>%
+  mutate(ln_length_ln_width_residuals = ln_length_ln_width_residuals[,1])
+```
+
+```{r Fit Linear Model Body Aspect Ratio ~ PC1}
+
+#ln_length_ln_width ~ PC1 (note we can use normal LM as PC1 already corrected and we are using the residuals for the body aspect ratio (see above))
+ln_length_ln_width_PC1 <- lm(data=species_data_filtered, ln_length_ln_width_residuals ~ PC1)
+summary(ln_length_ln_width_PC1)
+```
+
+```{r Scatterplot plot of Body Aspect Ratio ~ Precaudal PC1}
+z1 <- ggplot(species_data_filtered, aes(x=PC1, y=ln_length_ln_width_residuals))+
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_abline(intercept = ln_length_ln_width_PC1$coefficients[[1]],
+              slope = ln_length_ln_width_PC1$coefficients[[2]], 
+              size = 0.75, colour = 'red', linetype = 'dashed')+ #PGLS is red
+  scale_fill_manual(values = c(
+    "Astatotilapia" = "#E87D72",
+    "Rhamphochromis" = "#51B3E6",
+    "Diplotaxodon" = "grey",
+    "Deep benthic" = "#BD9C33",
+    "Shallow benthic" = "#A18BF8",
+    "Utaka" = "#FC61D7",
+    "Mbuna" = "#00C095"
+  ))+
+  xlab("Precaudal PC1 (Shape Variation Explained: 39.23%)")+
+  ylab("ln[Length]-ln[Width] Residuals")+
+  theme_classic()+
+  theme(legend.position = 'right')
+z1
+
+ggsave("Figures/Precaudal/precaudal_pc1_versus_ln_length_ln_width_residuals.jpeg", z1, width = 15, height = 10, units = "cm")
+```
+
+```{r Plot Highest PC2 species against Mean}
+#extract mean precaudal coordinates for Chilotilapia rhoadesii (loads most positively on PC2)
+species_coordinates <- species_means_procd[, , 'Chilotilapia rhoadesii']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("red")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Chilotilapia rhoadesii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Lowest PC2 species against Mean}
+#extract mean precaudal coordinates for Placidochromis johnstoni (loads most positively on PC2)
+species_coordinates <- species_means_procd[, , 'Astatotilapia gigliolii']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("blue")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Nimbochromis livingstonii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+# Ecomorphological Grouping
+
+```{r Plot PC1 and PC2 According to Ecomorphology}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC1, PC2))
+
+#plot PC1 and PC2 and the convex hulls
+a1 <- ggplot(species_data_filtered, aes(x = PC1, y = PC2)) +
+  geom_polygon(data = hull_data, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 2, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC1 (39.23%)')+	
+  ylab('PC2 (12.95%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+  ggtitle('Precaudal vertebrae')+
+  labs(fill = "Ecomorphology")
+a1
+
+ggsave("Figures/Precaudal/precaudal_pc1_pc2_ecomorphology.jpeg", a1, width = 25, height = 15, units = "cm")
+```
+
+
+```{r}
+#Fit MANOVA (Depth ~ PC1+PC2)
+eco_manova_pc1_pc2 <- procD.lm(cbind(species_data_filtered$PC1, species_data$PC2) ~ species_data_filtered$ecomorphology, seed=1931, iter = 100000, effect.type = "cohen")
+summary(eco_manova_pc1_pc2) #p = 0.1065 (n.s.)
+
+#run pairwise comparisons anyway
+pairwise_results_eco1 <- pairwise(eco_manova_pc1_pc2, groups = species_data_filtered$ecomorphology)
+summary(pairwise_results_eco1)
+```
+
+
+
+
+
+```{r Plot PC2 and PC3 According to Ecomorphology}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC2, PC3))
+
+#plot PC1 and PC2 and the convex hulls
+a2 <- ggplot(species_data_filtered, aes(x = PC2, y = PC3)) +
+  geom_polygon(data = hull_data, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC2 (12.95%)')+ 
+  ylab('PC3 (12.40%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Ecomorphology")
+a2
+
+ggsave("Figures/Precaudal/precaudal_pc2_pc3_ecomorphology.jpeg", a2, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Ecomorphology ~ PC2 + PC3 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+ecomorphology_manova_pc2_pc3 <- procD.lm(cbind(species_data_filtered$PC2, species_data_filtered$PC3) ~ species_data_filtered$ecomorphology, seed=1931, iter = 100000, effect.type = "cohen")
+summary(ecomorphology_manova_pc2_pc3)
+
+pairwise_results_ecomorphology <- pairwise(ecomorphology_manova_pc2_pc3, groups = species_data_filtered$ecomorphology)
+summary(pairwise_results_ecomorphology)
+```
+
+```{r Plot PC3 and PC4 According to Ecomorphology}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC3, PC4))
+
+#plot PC1 and PC2 and the convex hulls
+a3 <- ggplot(species_data_filtered, aes(x = PC3, y = PC4)) +
+  geom_polygon(data = hull_data, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC3 (12.40%)')+
+  ylab('PC4 (10.21%)')+ 
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Ecomorphology")
+a3
+
+ggsave("Figures/Precaudal/precaudal_pc3_pc4_ecomorphology.jpeg", a3, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Ecomorphology ~ PC3 + PC4 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC3+PC4)
+ecomorphology_manova_pc3_pc4 <- procD.lm(cbind(species_data_filtered$PC3, species_data_filtered$PC4) ~ species_data_filtered$ecomorphology, seed=1931, iter = 100000, effect.type = "cohen")
+summary(ecomorphology_manova_pc3_pc4)
+
+pairwise_results_ecomorphology <- pairwise(ecomorphology_manova_pc3_pc4, groups = species_data_filtered$ecomorphology)
+summary(pairwise_results_ecomorphology)
+```
+
+
+# Depth Preference
+
+```{r Plot PC1 and PC2 According to Depth Preference}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(depth_preference) %>%
+  slice(chull(PC1, PC2))
+
+#plot PC1 and PC2 and the convex hulls
+b1 <- ggplot(species_data_filtered, aes(x = PC1, y = PC2)) +
+  geom_polygon(data = hull_data, aes(fill = depth_preference, group = depth_preference), alpha = 0.3)+ 
+  geom_point(aes(fill = depth_preference), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "benthopelagic" = "#4286DE",
+    "demersal" = "#FFC108",
+    "pelagic" = "#1E4C40"
+  ))+
+  xlab('PC1 (39.23%)')+ 
+  ylab('PC2 (12.95%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Penth-pelagic axis position")
+b1
+
+ggsave("Figures/Precaudal/precaudal_pc1_pc2_depth.jpeg", b1, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Depth ~ PC1 + PC2 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+depth_manova_pc1_pc2 <- procD.lm(cbind(species_data_filtered$PC1, species_data_filtered$PC2) ~ species_data_filtered$depth, seed=1931, iter = 100000, effect.type = "cohen")
+summary(depth_manova_pc1_pc2)
+
+pairwise_results_depth <- pairwise(depth_manova_pc1_pc2, groups = species_data_filtered$depth)
+summary(pairwise_results_depth)
+```
+
+```{r Plot Effect Sizes for Depth (Precaudal - PC1, PC2)}
+#manually create a dataframe from pairwise results
+effect_size_df <- data.frame(
+  Comparison = c("BP-DE", 
+                 "BP-PE", 
+                 "DE-PE"),
+  Effect_Size = c(0.01436679, 0.05059178, 0.04178149),  #d-values
+  UCL_95 = c(0.02639788, 0.03161463, 0.03096073),  #Upper confidence limits
+  p_value = c(0.3739062609, 0.0006699933, 0.0054199458)  #p-values
+)
+
+b1a <- ggplot(effect_size_df, aes(x = Comparison, y = Effect_Size, fill = p_value < 0.05)) +
+  geom_col()+
+  geom_errorbar(aes(ymin = Effect_Size - UCL_95, ymax = Effect_Size + UCL_95), 
+                width = 0.2, color = "black")+
+  scale_fill_manual(values = c("red", "blue"), labels = c("Not Significant", "Significant"))+
+  labs(y = "Effect Size of PC1 + PC2 (d)",
+       x = 'Comparison',
+       fill = "Significance")+
+  theme_classic()+
+  theme(legend.position = "right",
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 0.00, vjust=0, hjust=0.50))
+
+b1a
+
+ggsave("Figures/Precaudal/precaudal_MANOVA_pc1_pc2_depth_effect_size.jpeg", b1a, dpi=300, width = 10, height = 10, units = "cm")
+```
+
+```{r Plot PC2 and PC3 According to Depth Preference}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(depth_preference) %>%
+  slice(chull(PC2, PC3))
+
+#plot PC1 and PC2 and the convex hulls
+b2 <- ggplot(species_data_filtered, aes(x = PC2, y = PC3)) +
+  geom_polygon(data = hull_data, aes(fill = depth_preference, group = depth_preference), alpha = 0.3)+ 
+  geom_point(aes(fill = depth_preference), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "benthopelagic" = "#4286DE",
+    "demersal" = "#FFC108",
+    "pelagic" = "#1E4C40"
+  ))+
+  xlab('PC2 (12.95%)')+ 	
+  ylab('PC3 (12.40%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Penth-pelagic axis position")
+b2
+
+ggsave("Figures/Precaudal/precaudal_pc2_pc3_depth.jpeg", b2, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Depth ~ PC2 + PC3 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+depth_manova_pc2_pc3 <- procD.lm(cbind(species_data_filtered$PC2, species_data_filtered$PC3) ~ species_data_filtered$depth, seed=1931, iter = 100000, effect.type = "cohen")
+summary(depth_manova_pc2_pc3) #p = 0.1787 (n.s.)
+
+#run pairwise comparisons anyway
+pairwise_results_depth <- pairwise(depth_manova_pc2_pc3, groups = species_data_filtered$depth)
+summary(pairwise_results_depth)
+```
+
+```{r Plot Effect Sizes for Depth (Precaudal - PC2, PC3)}
+#manually create a dataframe from pairwise results
+effect_size_df <- data.frame(
+  Comparison = c("BP-DE", 
+                 "BP-PE", 
+                 "DE-PE"),
+  Effect_Size = c(0.013673949, 0.019173525, 0.006504811),  #d-values
+  UCL_95 = c(0.01738922, 0.02074298, 0.02034082),  #Upper confidence limits
+  p_value = c(0.15723843, 0.07818922, 0.73521265)  #p-values
+)
+
+b1b <- ggplot(effect_size_df, aes(x = Comparison, y = Effect_Size, fill = p_value < 0.05)) +
+  geom_col()+
+  geom_errorbar(aes(ymin = Effect_Size - UCL_95, ymax = Effect_Size + UCL_95), 
+                width = 0.2, color = "black")+
+  scale_fill_manual(values = c("red", "blue"), labels = c("Not Significant", "Significant"))+
+  labs(y = "Effect Size of PC2 + PC3 (d)",
+       x = 'Comparison',
+       fill = "Significance")+
+  theme_classic()+
+  theme(legend.position = "right",
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 0.00, vjust=0, hjust=0.50))
+
+b1b
+
+ggsave("Figures/Precaudal/precaudal_MANOVA_pc2_pc3_depth_effect_size.jpeg", b1b, dpi=300, width = 10, height = 10, units = "cm")
+```
+
+```{r Plot PC3 and PC4 According to Depth Preference}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(depth_preference) %>%
+  slice(chull(PC3, PC4))
+
+#plot PC1 and PC2 and the convex hulls
+b3 <- ggplot(species_data_filtered, aes(x = PC3, y = PC4)) +
+  geom_polygon(data = hull_data, aes(fill = depth_preference, group = depth_preference), alpha = 0.3)+ 
+  geom_point(aes(fill = depth_preference), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "benthopelagic" = "#4286DE",
+    "demersal" = "#FFC108",
+    "pelagic" = "#1E4C40"
+  ))+
+  xlab('PC3 (12.40%)')+
+  ylab('PC4 (10.21%)')+ 
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Penth-pelagic axis position")
+b3
+
+ggsave("Figures/Precaudal/precaudal_pc3_pc4_depth.jpeg", b3, width = 25, height = 15, units = "cm")
+```
+```{r MANOVA of Depth ~ PC3 + PC4 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+depth_manova_pc3_pc4 <- procD.lm(cbind(species_data_filtered$PC3, species_data_filtered$PC4) ~ species_data_filtered$depth, seed=1931, iter = 100000, effect.type = "cohen")
+summary(depth_manova_pc3_pc4) #p = 0.1787 (n.s.)
+
+#run pairwise comparisons anyway
+pairwise_results_depth <- pairwise(depth_manova_pc3_pc4, groups = species_data_filtered$depth)
+summary(pairwise_results_depth)
+```
+
+# Piscivory
+
+```{r Plot PC1 and PC2 According to Piscivory}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(piscivore) %>%
+  slice(chull(PC1, PC2))
+
+#plot PC1 and PC2 and the convex hulls
+c1 <- ggplot(species_data_filtered, aes(x = PC1, y = PC2)) +
+  geom_polygon(data = hull_data, aes(fill = piscivore, group = piscivore), alpha = 0.3)+ 
+  geom_point(aes(fill = piscivore), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "piscivore" = "#932CE7",
+    "non-piscivore" = "#296218"
+  ))+
+  xlab('PC1 (39.23%)')+ 
+  ylab('PC2 (12.95%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Piscivory")
+c1
+
+ggsave("Figures/Precaudal/precaudal_pc1_pc2_piscivore.jpeg", c1, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Piscivory ~ PC1 + PC2 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+piscivore_manova_pc1_pc2 <- procD.lm(cbind(species_data_filtered$PC1, species_data_filtered$PC2) ~ species_data_filtered$piscivore, seed=1931, iter = 100000, effect.type = "cohen")
+summary(piscivore_manova_pc1_pc2)
+
+pairwise_results_piscivore <- pairwise(piscivore_manova_pc1_pc2, groups = species_data_filtered$piscivore)
+summary(pairwise_results_piscivore)
+```
+
+```{r Plot PC2 and PC3 According to Piscivory}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(piscivore) %>%
+  slice(chull(PC2, PC3)) 
+
+#plot PC1 and PC2 and the convex hulls
+c2 <- ggplot(species_data_filtered, aes(x = PC2, y = PC3)) +
+  geom_polygon(data = hull_data, aes(fill = piscivore, group = piscivore), alpha = 0.3)+ 
+  geom_point(aes(fill = piscivore), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "piscivore" = "#932CE7",
+    "non-piscivore" = "#296218"
+  ))+
+  xlab('PC2 (12.95%)')+ 
+  ylab('PC3 (12.40%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Piscivory")
+c2
+
+ggsave("Figures/Precaudal/precaudal_pc2_pc3_piscivore.jpeg", c2, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Piscivory ~ PC2 + PC3 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+piscivore_manova_pc2_pc3 <- procD.lm(cbind(species_data_filtered$PC2, species_data_filtered$PC3) ~ species_data_filtered$piscivore, seed=1931, iter = 100000, effect.type = "cohen")
+summary(piscivore_manova_pc2_pc3)
+
+pairwise_results_piscivore <- pairwise(piscivore_manova_pc2_pc3, groups = species_data_filtered$piscivore)
+summary(pairwise_results_piscivore)
+```
+
+```{r Plot PC3 and PC4 According to Piscivory}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data_filtered %>%
+  group_by(piscivore) %>%
+  slice(chull(PC3, PC4))
+
+#plot PC1 and PC2 and the convex hulls
+c3 <- ggplot(species_data_filtered, aes(x = PC3, y = PC4)) +
+  geom_polygon(data = hull_data, aes(fill = piscivore, group = piscivore), alpha = 0.3)+ 
+  geom_point(aes(fill = piscivore), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "piscivore" = "#932CE7",
+    "non-piscivore" = "#296218"
+  ))+
+  xlab('PC3 (12.40%)')+
+  ylab('PC4 (10.21%)')+ 
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Precaudal vertebrae')+
+  labs(fill = "Piscivory")
+  
+c3
+
+ggsave("Figures/Precaudal/precaudal_pc3_pc4_piscivore.jpeg", c3, width = 25, height = 15, units = "cm")
+```
+
+
+
+```{r MANOVA of Piscivory ~ PC2 + PC3 (Precaudal Vertebrae)}
+#Fit MANOVA (Depth ~ PC1+PC2)
+piscivore_manova_pc3_pc4 <- procD.lm(cbind(species_data_filtered$PC3, species_data_filtered$PC4) ~ species_data_filtered$piscivore, seed=1931, iter = 100000, effect.type = "cohen")
+summary(piscivore_manova_pc3_pc4)
+
+pairwise_results_piscivore <- pairwise(piscivore_manova_pc3_pc4, groups = species_data_filtered$piscivore)
+summary(pairwise_results_piscivore)
+```
+
+## Precaudal Vertebrae (Maximise Bending Energy)
+
+```{r Procrustes Superimposition on Precaudal Vertebrae (Bending Energy)}
+
+#general procrustes superimposition on all caudal coordinates
+gpa_precaudal_book <- gpagen(precaudal, curves = precaudal_sliders, max.iter = 100, ProcD = FALSE)
+#here we are maximising bending energy between semilandmarks (as described by Bookstein 1997)
+
+#extract specimen IDs
+specimen_ids <- dimnames(gpa_precaudal_book$coords)[[3]]  #extract specimen names
+species <- gsub("(^[A-Za-z]+_[a-z]+).*", "\\1", specimen_ids)  #extract Genus_species
+
+#filter for unique species
+unique_species <- unique(species)
+
+#create an empty array to store species mean shapes
+species_means_book <- array(NA, dim = c(dim(gpa_precaudal_book$coords)[1], dim(gpa_precaudal_book$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape
+for (i in seq_along(unique_species)) {
+  species_means_book[,,i] <- mshape(gpa_precaudal_book$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means_book)[[3]] <- unique_species
+```
+
+```{r Plot all Aligned Precaudal Landmarks (Precaudal - Bending Energy)}
+#this should pop-up a 3D plot of all of the aligned coordinates in X,Y,Z space
+plotAllSpecimens(gpa_precaudal_book$coords, mean=TRUE, label=TRUE, plot_param = list(mean.col='red', txt.cex=2.00, txt.adj=5.00, txt.col='red'))
+```
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates (Bending Energy)}
+
+#perform PCA on species means 
+pca_precaudal_procd <- gm.prcomp(species_means_procd, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_precaudal_procd)
+```
+
+```{r Simple PCA to Visualise Variation (Precaudal - Bending Energy)}
+
+#perform PCA on species means 
+pca_precaudal_book <- gm.prcomp(species_means_book, phy=pruned_tree, GLS=TRUE)
+
+species_means_book
+pruned_tree
+
+#plot PCA results
+plot(pca_precaudal_book) #I think you may need to check the precaudal vertebrae for several of the specimens (see the plot)
+
+#add species names as labels on the plot
+text(pca_precaudal_book$x[,1], pca_precaudal_book$x[,2], labels = dimnames(species_means_book)[[3]], pos = 4, cex = 0.50)
+```
+
+## Compare ProcD versus Bending Energy
+
+```{r Compare ProcD and Bending Energy PCA}
+#Plot PCA plots side by side
+par(mfrow = c(1, 2))
+
+#Procrustes Distances (Rolfe 2010)
+plot(pca_precaudal_procd)
+text(pca_precaudal_procd$x[,1], pca_precaudal_procd$x[,2], labels = dimnames(species_means_procd)[[3]], pos = 4, cex = 0.25)
+
+#Bending Energy (Bookstein 1997)
+plot(pca_precaudal_book)
+text(pca_precaudal_book$x[,1], pca_precaudal_book$x[,2], labels = dimnames(species_means_book)[[3]], pos = 4, cex = 0.25)
+```
+

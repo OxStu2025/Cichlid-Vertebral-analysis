@@ -1,0 +1,95 @@
+---
+title: "CSV to TPS File Conversion"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+library(dplyr) #for manipulation of dataframes
+library(stringr) #for useful string codes
+library(geomorph)
+```
+
+```{r Import CSV File}
+csv_file <- read.csv("Data/compiled_landmark_coordinates.csv")
+```
+
+```{r Order the Landmarks}
+#order the csv file so the landmarks are in numerical order for each specimen (essential for TPS file conversion function, which will assume landmarks are in the correct order)
+csv_file_ordered <- 
+  csv_file %>%
+  dplyr::select(-X, -label) %>%
+  mutate(landmark = as.numeric(str_extract(file_name, "(?<=lm_)\\d{1,2}"))) %>%  #extract and convert to numeric
+  group_by(specimen) %>%
+  arrange(specimen, landmark)  #arrange within each specimen group
+```
+
+```{r Function to Write TPS File}
+
+#will identify and split into two TPS files, one for precaudal vertebrae and one for caudal vertebrae
+write_tps_split <- function(df, precaudal_file, caudal_file) {
+  #open separate output files for precaudal and caudal vertebrae
+  precaudal_sink <- file(precaudal_file, "w") #write to precaudal file
+  caudal_sink <- file(caudal_file, "w") #write to caudal file
+  
+  #get unique specimen names
+  unique_specimens <- unique(df$specimen)  #i.e. each vertebrae
+  
+  #loop through each unique specimen
+  for (specimen in unique_specimens) {
+    subset_data <- df[df$specimen == specimen, ]
+    
+    #define the number of landmarks
+    num_landmarks <- nrow(subset_data) #count the number of groups per unique specimen (either total 17 or 27)
+    
+    #check if specimen has 17 [TOTAL] landmarks (caudal vertebrae)
+    if (num_landmarks == 17) {
+      writeLines("LM=17", caudal_sink)
+      for (i in 1:17) {
+        writeLines(paste(subset_data$x[i], subset_data$y[i], subset_data$z[i]), caudal_sink)
+      }
+      writeLines(paste0("ID=", specimen, "_caudal\n"), caudal_sink)
+      
+    } else {  #assume precaudal vertebrae if nrow != 17
+      writeLines("LM=17", precaudal_sink)  #define fixed number of landmarks (still 17, 15 + 2 tips of pleural ribs)
+      
+      #write fixed landmarks (first 16 + 27th)
+      for (i in c(1:16, 27)) {
+        if (i <= num_landmarks) {
+          writeLines(paste(subset_data$x[i], subset_data$y[i], subset_data$z[i]), precaudal_sink)
+        }
+      }
+      
+      #define curves
+      writeLines("CURVES=1", precaudal_sink) #define rib curvature points (semi-landmarks)
+      writeLines("POINTS=10", precaudal_sink) #10 seminlandmarks used
+      
+      # Write semi-landmarks (17 to 26)
+      for (i in 17:26) {
+        if (i <= num_landmarks) {
+          writeLines(paste(subset_data$x[i], subset_data$y[i], subset_data$z[i]), precaudal_sink)
+        }
+      }
+      
+      writeLines(paste0("ID=", specimen, "_precaudal\n"), precaudal_sink)
+    }
+  }
+  
+  # Close file connections
+  close(precaudal_sink)
+  close(caudal_sink)
+}
+```
+
+```{r Write TPS File}
+#define output file (change this to something useful)
+write_tps_split(csv_file_ordered, "Data/precaudal.tps", "Data/caudal.tps")
+```
+
+
+

@@ -1,0 +1,300 @@
+---
+title: "Vertebral Aspect Ratios Analysis"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #data wrangling
+require(stringr) #useful string manipulation
+require(ggplot2) #data visualisation and plotting
+require(ape) #phylogenetic tree plotting and manipulation
+require(caper) #phylogenetic generalised least squares (PGLS) regression
+require(phytools) #phylogenetic ANOVA
+```
+
+```{r Import Data}
+#vertebral aspect ratios
+vertebral_aspect_ratios <- read.csv('Data/vertebral_aspect_ratios.csv')
+
+#import all species data
+all_species_data <- readRDS('Data/all_species.rds')
+
+```
+
+```{r Summarise Vertebral Aspect Ratio}
+
+#calculate species averages regardless of caudal or precaudal
+vertebral_aspect_ratios_species <- 
+  vertebral_aspect_ratios %>%
+  group_by(species_name) %>%
+  summarise(mean_vertebral_raw_aspect_ratio = mean(raw_aspect_ratio, na.rm=TRUE),
+            mean_vertebral_ln_length_ln_width = mean(ln_length_ln_width))
+
+#calculate species average for both precaudal and caudal vertebrae
+vertebral_aspect_ratios_domain_species <- 
+  vertebral_aspect_ratios %>%
+  group_by(species_name, domain) %>%
+  summarise(mean_vertebral_raw_aspect_ratio = mean(raw_aspect_ratio, na.rm=TRUE),
+            mean_vertebral_ln_length_ln_width = mean(ln_length_ln_width))
+```
+
+```{r Tree Pruning and Data Subsetting}
+#specify tree
+tree <- all_species_data$tree
+
+#sort out species names to match phylogeny
+vertebral_aspect_ratios_species$species_name <- gsub('_', " ", vertebral_aspect_ratios_species$species_name)
+
+#filter out hybrids and Astatotilapia sp. 'Ruaha blue'
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis'))
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, vertebral_aspect_ratios_species_filtered$species_name)
+
+#reorder dataframe so that species order matches order of phylogeny tips
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species_filtered %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count_data to species present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% vertebral_aspect_ratios_species_filtered$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, vertebral_aspect_ratios_species_filtered, by='species_name')
+
+#reorder the new damn dataframe
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+```
+
+## Phylogenetic Generalised Least Squares (PGLS) Regression
+
+```{r Construct VCV Matrix for Downstream Analysis}
+#construct the variance-covariance (VCV) matrix:
+vcv_matrix <- caper::comparative.data(pruned_tree, combined_data, species_name, vcv=TRUE, vcv.dim=3)
+```
+
+```{r Define Model to Fit OLS and Multiple PGLS Models}
+fit_pgls_models <- function(data, response, predictor, interaction = NULL, model_type = "additive") {
+  if (model_type == "interaction" && !is.null(interaction)) {
+    #interaction model
+    formula <- as.formula(paste(response, "~", predictor, "*", interaction))
+  } else if (model_type == "additive" && !is.null(interaction)) {
+    #additive model
+    formula <- as.formula(paste(response, "~", predictor, "+", interaction))
+  } else {
+    #simple model with only the predictor
+    formula <- as.formula(paste(response, "~", predictor))
+  }
+  
+  #fit the models
+  all.ols <- lm(data = data$data, formula)
+  all.pgls.fixed <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 1.00)
+  all.pgls.lambda <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 1.00)
+  all.pgls.delta <- caper::pgls(formula, data, lambda = 1.00, delta = 'ML', kappa = 1.00)
+  all.pgls.kappa <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 1.00)
+  all.pgls.lambda.kappa <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.kappa.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 'ML')
+  
+  #store model fits into a list
+  model_fits <- list(all.ols, 
+                     all.pgls.fixed, 
+                     all.pgls.lambda, 
+                     all.pgls.delta, 
+                     all.pgls.kappa,
+                     all.pgls.lambda.delta,
+                     all.pgls.lambda.kappa,
+                     all.pgls.lambda.kappa.delta)
+  
+  #compare the models using AIC
+  aic_values <- AIC(all.ols, 
+                    all.pgls.fixed, 
+                    all.pgls.lambda, 
+                    all.pgls.delta, 
+                    all.pgls.kappa,
+                    all.pgls.lambda.delta,
+                    all.pgls.lambda.kappa,
+                    all.pgls.lambda.kappa.delta)
+  
+  #return both the model fits and AIC values
+  results <- list(
+    model_fits = model_fits,
+    aic_values = aic_values
+  )
+  
+  return(results)
+}
+```
+
+```{r Fit OLS and PGLS Models}
+#vertebral_aspect ratio ~ total count
+vertebral_aspect_ratio_total_count <- 
+  fit_pgls_models(vcv_matrix, "mean_vertebral_ln_length_ln_width", "total_count")
+saveRDS(vertebral_aspect_ratio_total_count, 'Data/vertebral_aspect_ratio_total_count.rds')
+
+summary(vertebral_aspect_ratio_total_count$model_fits[[8]])
+
+#vertebral aspect ratio ~ whole body aspect ratio
+vertebral_and_body_aspect_ratio <- fit_pgls_models(vcv_matrix, "mean_vertebral_ln_length_ln_width", "ln_length_ln_width")
+saveRDS(vertebral_and_body_aspect_ratio, 'Data/vertebral_and_body_aspect_ratio.rds')
+
+#whole body aspect ratio ~ total vertebral count + vertebral aspect ratio (additive model)
+body_aspect_ratio_total_count_vertebral_aspect_ratio_additive <- fit_pgls_models(vcv_matrix, "ln_length_ln_width", "total_count", interaction = "mean_vertebral_ln_length_ln_width", model_type = "additive")
+saveRDS(body_aspect_ratio_total_count_vertebral_aspect_ratio_additive, 'Data/body_aspect_ratio_total_count_vertebral_aspect_ratio_additive.rds')
+```
+
+```{r Combine Ecological Data with Vertebral Aspect Ratio Data}
+#filter all species qualitative data:
+help <- 
+  all_species_data$stored_data %>%
+  filter(species_name %in% combined_data$species_name)
+
+#bind to combined_data (i.e. with vertebral aspect ratios and count data)
+combined_data <- merge(help, combined_data, by='species_name')
+combined_data$lm_ecology <- as.factor(combined_data$lm_ecology)
+```
+
+```{r Scatterplot of Vertebral Aspect Ratio and Total Count}
+
+a1 <- ggplot(combined_data, aes(x=total_count, y=mean_vertebral_ln_length_ln_width)) +
+  geom_point(aes(colour = lm_ecology), size=3.00)+
+  geom_abline(intercept=vertebral_aspect_ratio_total_count$model_fits[[1]]$coefficients[[1]], 
+              slope = vertebral_aspect_ratio_total_count$model_fits[[1]]$coefficients[[2]], 
+              size = 0.75, colour = 'black', linetype = 'solid') + # OLS is black
+  geom_abline(intercept = vertebral_aspect_ratio_total_count$model_fits[[8]]$model$coef[[1]], 
+              slope = vertebral_aspect_ratio_total_count$model_fits[[8]]$model$coef[[2]], 
+              size = 0.75, colour = 'red', linetype = 'dashed')+ # PGLS is red
+   scale_colour_manual(values = c(
+    "Astatotilapia" = "#E87D72",
+    "not_applicable" = "#E87D72",
+    "Rhamphochromis" = "#51B3E6",
+    "Diplotaxodon" = "grey",
+    "Deep Benthic" = "#BD9C33",
+    "Shallow Benthic" = "#A18BF8",
+    "Utaka" = "#FC61D7",
+    "Mbuna" = "#00C095"
+  ))+
+  xlab("ln[Total Count]")+
+  ylab("Centrum ln[length] - ln[Width]")+
+  ggtitle("Vertebral Aspect Ratio ~ Total Count (R^2=0.102, m=-0.697, p=0.019, *)")+
+  theme_classic()+
+  theme(legend.position = 'right')
+  theme(plot.title = element_text(colour = "red"))
+  
+a1  
+
+ggsave("Figures/vertebral_aspect_ratio_total_count.jpeg", a1, width = 15, height = 10, units = "cm")
+```
+
+```{r Scatterplot of Body Aspect Ratio and Vertebral Aspect Ratio}
+a2 <- ggplot(combined_data, aes(x=ln_length_ln_width, y=mean_vertebral_ln_length_ln_width))+
+  geom_point(size=2.00)+
+  geom_abline(intercept=vertebral_and_body_aspect_ratio$model_fits[[1]]$coefficients[[1]], 
+              slope = vertebral_and_body_aspect_ratio$model_fits[[1]]$coefficients[[2]], 
+              size = 0.75, colour = 'black', linetype = 'solid')+ # OLS is black
+  geom_abline(intercept = vertebral_and_body_aspect_ratio$model_fits[[3]]$model$coef[[1]], 
+              slope = vertebral_and_body_aspect_ratio$model_fits[[3]]$model$coef[[2]], 
+              size = 0.75, colour = 'red', linetype = 'dashed')+ # PGLS is red
+  ylab("Vertebral Aspect Ratio")+
+  xlab("Body Aspect Ratio")+
+  ggtitle("Vertebral Aspect Ratio ~ Body Aspect Ratio (R^2=0.046, m=-0.179, p=0.128, n.s.)")+
+  theme_classic()+
+  theme(plot.title = element_text(colour = "red"))
+a2
+
+
+ggsave("Figures/vertebral_aspect_ratio_body_aspect_ratio.jpeg", a2, width = 20, height = 20, units = "cm")
+```
+
+```{r Clean up Precaudal and Caudal Vertebral Aspect Ratio Data}
+#clean up precaudal, caudal vertebral aspect ratio data and match data order to that of the phylogeny
+vertebral_aspect_ratios_domain_species <- 
+  vertebral_aspect_ratios_domain_species %>%
+  mutate(species_name = gsub('_', " ", species_name)) %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra')) %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#merge with qualitative datga
+vertebral_aspect_ratios_domain_species <- merge(vertebral_aspect_ratios_domain_species, 
+               combined_data, by='species_name')
+
+vertebral_aspect_ratios_domain_species
+```
+
+```{r ANOVA to Check Sig Diff between Precaudal and Caudal Aspect Ratios}
+#t_test to check whether diff might be sig. (no phylogenetic correction)
+t_test_ln_length_ln_width <- t.test(
+  mean_vertebral_ln_length_ln_width.x ~ domain, 
+  data = vertebral_aspect_ratios_domain_species
+)
+t_test_ln_length_ln_width 
+
+#phylogenetic ANOVA precaudal aspect ratio ~ caudal aspect ratio (are the means sig. dif. when we account for phylogeny?)
+set.seed(1931)
+precaudal_caudal_vertebral_aspect_ratio_anova <-
+  phytools::phylANOVA(pruned_tree, vertebral_aspect_ratios_domain_species$domain, vertebral_aspect_ratios_domain_species$mean_vertebral_ln_length_ln_width.x, nsim=10000, posthoc=FALSE, p.adj="holm") #posthoc not needed, only two groups
+precaudal_caudal_vertebral_aspect_ratio_anova
+```
+
+```{r Boxplot of Precaudal and Caudal Vertebral Aspect Ratios}
+
+set.seed(2016) #for geom_jitter
+
+#recode and reorder domain names to make them nicer and display them in correct order
+vertebral_aspect_ratios_domain_species$domain <- dplyr::recode(vertebral_aspect_ratios_domain_species$domain,
+                                                  "caudal" = "Caudal",
+                                                  "precaudal" = "Precaudal")
+vertebral_aspect_ratios_domain_species$domain <- factor(vertebral_aspect_ratios_domain_species$domain, 
+                                                  levels = c("Precaudal", "Caudal"))
+
+#plot precaudal and caudal vertebral aspect ratios
+a3 <- ggplot(vertebral_aspect_ratios_domain_species, aes(x=domain, y=mean_vertebral_ln_length_ln_width.x))+
+  geom_boxplot()+
+  stat_summary(fun = mean, geom = "point", shape = 4, colour = 'red', size = 5)+
+  xlab("Vertebral Identity")+
+  ylab("Centrum ln[length] - ln[Width]")+
+  geom_jitter(aes(colour=lm_ecology), size = 2.00)+
+     scale_colour_manual(values = c(
+    "Astatotilapia" = "#E87D72",
+    "not_applicable" = "#E87D72",
+    "Rhamphochromis" = "#51B3E6",
+    "Diplotaxodon" = "grey",
+    "Deep Benthic" = "#BD9C33",
+    "Shallow Benthic" = "#A18BF8",
+    "Utaka" = "#FC61D7",
+    "Mbuna" = "#00C095"
+  ))+
+  theme_classic()+
+  #ggtitle("Precaudal Aspect Ratios ~ Caudal Aspect Ratios (Phylo ANOVA: p=0.0017, **)")+
+  theme_classic()+
+  #theme(plot.title = element_text(colour = "red"))
+  theme(legend.position = 'right')
+a3
+
+ggsave("Figures/vertebral_aspect_ratio_precaudal_caudal.jpeg", a3, width = 10, height = 10, units = "cm")
+```
+
+
+

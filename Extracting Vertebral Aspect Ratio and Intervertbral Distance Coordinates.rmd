@@ -1,0 +1,339 @@
+---
+title: "Calculating Centra Aspect Ratios and Intercentra Distance Coordinates"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(ggplot2)
+require(tibble)
+```
+
+```{r Import CSV File of Landmarks}
+
+#import csv file with landmark coordinates
+landmark_coordinates <- 
+  read.csv("Data/compiled_landmark_coordinates.csv")
+
+```
+
+```{r Wranging Landmark Coordinate Dataframe}
+
+#add landmarks column
+landmark_coordinates <-
+  landmark_coordinates %>%
+  mutate(landmarks = as.numeric(str_extract(landmark_coordinates$file_name, "(?<=lm_)\\d+"))) %>%
+  dplyr::select(-X, -label)
+```
+
+## Vertebral Aspect Ratios
+
+```{r Calculation of Vertebral Lengths (Anteroposterior)}
+
+# 3 --> 12 
+# 5 --> 14
+# 4 --> 13
+
+#calculate lengths between corresponding landmarks on anterior and posterior cones and take average
+vertebral_lengths <- landmark_coordinates %>%
+  group_by(specimen) %>%
+  summarise(
+    x1 = first(x[landmarks == 5]), 
+    y1 = first(y[landmarks == 5]), 
+    z1 = first(z[landmarks == 5]),
+    x2 = first(x[landmarks == 14]),
+    y2 = first(y[landmarks == 14]),
+    z2 = first(z[landmarks == 14]),
+    x3 = first(x[landmarks == 3]),
+    y3 = first(y[landmarks == 3]),
+    z3 = first(z[landmarks == 3]),
+    x4 = first(x[landmarks == 12]),
+    y4 = first(y[landmarks == 12]),
+    z4 = first(z[landmarks == 12]),
+    x5 = first(x[landmarks == 4]),
+    y5 = first(y[landmarks == 4]),
+    z5 = first(z[landmarks == 4]),
+    x6 = first(x[landmarks == 13]),
+    y6 = first(y[landmarks == 13]),
+    z6 = first(z[landmarks == 13]),
+    length_1 = ifelse(
+      !is.na(x1) & !is.na(x2),
+      sqrt((x2 - x1)^2 + (y2 - y1)^2 + (z2 - z1)^2),
+      NA
+    ),
+    length_2 = ifelse(
+      !is.na(x3) & !is.na(x4),
+      sqrt((x4 - x3)^2 + (y4 - y3)^2 + (z4 - z3)^2),
+      NA
+    ),
+    length_3 = ifelse(
+      !is.na(x3) & !is.na(x4),
+      sqrt((x6 - x5)^2 + (y6 - y5)^2 + (z6 - z5)^2),
+      NA
+    ),
+    mean_length = ((length_1 + length_2 + length_3)/3),
+    ln_length = log(mean_length)
+  )
+
+#identify specimens missing landmarks needed for length calculation
+missing_specimens_anteroposterior <- vertebral_lengths %>%
+  filter(is.na(length_1) | is.na(length_2) | is.na(length_3)) %>%
+  dplyr::select(specimen)
+
+#any missing
+any(missing_specimens_anteroposterior)
+
+#extract just length measures
+vertebral_lengths_clean <- 
+  vertebral_lengths %>%
+  group_by(specimen) %>%
+  dplyr::select(specimen, length_1, length_2, length_3, mean_length, ln_length)
+```
+
+```{r Calculation of Vertebral Widths (Dorsoventral)}
+
+# 3 --> 4 
+
+# 12 --> 13
+
+#calculate vertebral widths for specimens with both landmarks
+vertebral_widths <- landmark_coordinates %>%
+  group_by(specimen) %>%
+  summarise(
+    x1 = first(x[landmarks == 3]), #AP
+    y1 = first(y[landmarks == 3]), 
+    z1 = first(z[landmarks == 3]),
+    x2 = first(x[landmarks == 4]),
+    y2 = first(y[landmarks == 4]),
+    z2 = first(z[landmarks == 4]),
+    x3 = first(x[landmarks == 12]),
+    y3 = first(y[landmarks == 12]),
+    z3 = first(z[landmarks == 12]),
+    x4 = first(x[landmarks == 13]),
+    y4 = first(y[landmarks == 13]),
+    z4 = first(z[landmarks == 13]), #define the coordinates for AP and DV axis
+    width_1 = ifelse(
+      !is.na(x1) & !is.na(x2),
+      sqrt((x2 - x1)^2 + (y2 - y1)^2 + (z2 - z1)^2),
+      NA
+    ),
+    width_2 = ifelse(
+      !is.na(x3) & !is.na(x4),
+      sqrt((x4 - x3)^2 + (y4 - y3)^2 + (z4 - z3)^2),
+      NA
+    ),
+    mean_width = ((width_1 + width_2)/2),
+    ln_width = log(mean_width)
+  )
+
+#identify specimens missing landmarks needed for length or width calculation
+missing_specimens_dorsoventral <- vertebral_widths %>%
+  filter(is.na(width_1) | is.na(width_2)) %>%
+  dplyr::select(specimen)
+
+#any missing
+any(missing_specimens_dorsoventral)
+
+#extract just length measures
+vertebral_widths_clean <- 
+  vertebral_widths %>%
+  group_by(specimen) %>%
+  dplyr::select(specimen, width_1, width_2, mean_width, ln_width)
+```
+
+```{r Calculate Vertebral Aspect Ratios}
+
+#bind two dataframes together and calculate aspect ratio
+vertebral_aspect_ratios <- merge(vertebral_lengths_clean, vertebral_widths_clean, 'specimen')
+
+#calculate vertebral aspect ratios for each specimen
+vertebral_aspect_ratios_clean <- 
+  vertebral_aspect_ratios %>%
+  group_by(specimen) %>%
+  summarise(
+    mean_length = mean_length,
+    mean_width = mean_width,
+    raw_aspect_ratio = mean_length / mean_width,
+    ln_length = ln_length,
+    ln_width = ln_width,
+    ln_length_ln_width = ln_length - ln_width
+  ) %>%
+  mutate(
+    species_name = str_extract(specimen, "^[A-Za-z]+_[A-Za-z]+"),
+    domain= case_when(
+      grepl("v\\+2|v\\+3|v\\+4", specimen) ~ "precaudal",
+      grepl("v-2|v-3|v-4", specimen) ~ "caudal",
+      TRUE ~ NA 
+    )
+  )
+
+```
+
+```{r Export Vertebral Aspect Ratio Data}
+
+write.csv(vertebral_aspect_ratios_clean, "Data/vertebral_aspect_ratios.csv")
+
+```
+
+## Intervertebral Distances
+
+```{r Extract Relevant Anterior and Posterior Cone Landmarks}
+#precaudal vertebrae
+#v+4: 12, 13, 14
+#v+3: 3, 4, 5, 12, 13, 14
+#v+2: 3, 4, 5
+
+#caudal vertebrae
+#v-4: 3, 4, 5
+#v-3: 3, 4, 5, 12, 13, 14
+#v-2: 12, 13, 14
+
+landmark_coordinates <- landmark_coordinates %>%
+  mutate(
+    vertebrae = str_extract(specimen, "v[+-][2-4]$"),  # Extracts the vertebrae like v+2, v-3, etc.
+    individual = ifelse(str_detect(specimen, "_v\\d{2,}_v?[+-]?[2-4]$"), 
+                        str_extract(specimen, ".*(?=_v\\d{2,}_v[+-][2-4]$)"),  # If vXX is found, extract before _vXX_v
+                        str_extract(specimen, ".*(?=_v[+-][2-4]$)")  # Otherwise, extract before _v[+-][2-4]
+    )
+  )
+```
+
+```{r Define a Function to Calculate Intervertebral Distances}
+
+#define a function to compute Euclidean distance for given landmarks and vertebrae
+calculate_euclidean_distance <- function(data, landmark1, vertebrae1, landmark2, vertebrae2) {
+  
+  # Filter for first landmark-vertebrae pair
+  lm1 <- data %>%
+    filter(landmarks == landmark1, vertebrae == vertebrae1) %>%
+    dplyr::select(individual, x, y, z)
+  
+  # Filter for second landmark-vertebrae pair
+  lm2 <- data %>%
+    filter(landmarks == landmark2, vertebrae == vertebrae2) %>%
+    dplyr::select(individual, x, y, z)
+  
+  # Join the two datasets by 'individual'
+  paired_landmarks <- lm1 %>%
+    inner_join(lm2, by = "individual", suffix = c("_lm1", "_lm2"))
+  
+  # Compute Euclidean distance
+  paired_landmarks <- paired_landmarks %>%
+    mutate(euclidean_distance = sqrt((x_lm1 - x_lm2)^2 + 
+                                     (y_lm1 - y_lm2)^2 + 
+                                     (z_lm1 - z_lm2)^2))
+  
+  # Return only individual and computed distance
+  return(paired_landmarks %>% dplyr::select(individual, euclidean_distance))
+}
+```
+
+```{r Calculate Intervertebral Distances for Precaudal Vertebrae}
+
+#key:
+#pc_4_14_pc_3_5 == 'Preaudal vertebrae (v+4), landmark 14 --> Precaudal vertebrae (v+3), landmark 5
+
+#calculate distances for each landmark pair for precaudal vertebrae (anterior)
+pc_4_14_pc_3_5 <- calculate_euclidean_distance(landmark_coordinates, 14, "v+4", 5, "v+3")
+pc_4_12_pc_3_3 <- calculate_euclidean_distance(landmark_coordinates, 12, "v+4", 3, "v+3")
+pc_4_13_pc_3_4 <- calculate_euclidean_distance(landmark_coordinates, 13, "v+4", 4, "v+3")
+
+#merge all dataframes together (precaudal anterior)
+precaudal_anterior_distances <- Reduce(function(x, y) merge(x, y, by = "individual", all = TRUE), 
+                                       list(pc_4_14_pc_3_5, pc_4_12_pc_3_3, pc_4_13_pc_3_4))
+
+#calculate a mean
+precaudal_anterior_distances <- 
+  precaudal_anterior_distances %>%
+  group_by(individual) %>%
+  mutate(mean_distance_1 = ((log(euclidean_distance.x) + log(euclidean_distance.y) + log(euclidean_distance))/3))
+
+#calculate distances for each landmark pair for precaudal vertebrae (posterior)
+pc_3_12_pc_2_3 <- calculate_euclidean_distance(landmark_coordinates, 12, "v+3", 3, "v+2")
+pc_3_14_pc_2_5 <- calculate_euclidean_distance(landmark_coordinates, 14, "v+3", 5, "v+2")
+pc_3_13_pc_2_4 <- calculate_euclidean_distance(landmark_coordinates, 13, "v+3", 4, "v+2")
+
+#merge all dataframes together (precaudal posterior)
+precaudal_posterior_distances <- Reduce(function(x, y) merge(x, y, by = "individual", all = TRUE), 
+                                       list(pc_3_12_pc_2_3, pc_3_14_pc_2_5, pc_3_13_pc_2_4))
+
+#calculate a mean
+precaudal_posterior_distances <- 
+  precaudal_posterior_distances %>%
+  group_by(individual) %>%
+  mutate(mean_distance_2 = ((log(euclidean_distance.x) + log(euclidean_distance.y) + log(euclidean_distance))/3))
+
+#combine mean of precaudal distances
+precaudal_intervertebral_distances <- precaudal_anterior_distances %>%
+  dplyr::select(individual, mean_distance_1) %>%
+  inner_join(precaudal_posterior_distances %>% dplyr::select(individual, mean_distance_2), by = "individual") %>%
+  mutate(precaudal_intervertebral_distance = (mean_distance_1 + mean_distance_2) / 2)
+
+
+
+precaudal_intervertebral_distances
+```
+
+```{r Calculate Intervertebral Distances for Caudal Vertebrae}
+
+#key:
+#c_2_14_c_3_5 == 'Caudal vertebrae (v-2), landmark 14 --> caudal vertebrae (v-3), landmark 5
+
+#calculate distances for each landmark pair for caudal vertebrae (anterior)
+c_2_14_c_3_5 <- calculate_euclidean_distance(landmark_coordinates, 14, "v-2", 5, "v-3")
+c_2_12_c_3_3 <- calculate_euclidean_distance(landmark_coordinates, 12, "v-2", 3, "v-3")
+c_2_13_c_3_4 <- calculate_euclidean_distance(landmark_coordinates, 13, "v-2", 4, "v-3")
+
+#merge all dataframes together (caudal anterior)
+caudal_anterior_distances <- Reduce(function(x, y) merge(x, y, by = "individual", all = TRUE), 
+                                       list(c_2_14_c_3_5, c_2_12_c_3_3, c_2_13_c_3_4))
+
+#calculate a mean
+caudal_anterior_distances <- 
+  caudal_anterior_distances %>%
+  group_by(individual) %>%
+  mutate(mean_distance_1 = ((log(euclidean_distance.x) + log(euclidean_distance.y) + log(euclidean_distance))/3))
+
+#calculate distances for each landmark pair for caudal vertebrae (posterior)
+c_3_12_c_4_3 <- calculate_euclidean_distance(landmark_coordinates, 12, "v-3", 3, "v-4")
+c_3_14_c_4_5 <- calculate_euclidean_distance(landmark_coordinates, 14, "v-3", 5, "v-4")
+c_3_13_c_4_4 <- calculate_euclidean_distance(landmark_coordinates, 13, "v-3", 4, "v-4")
+
+#merge all dataframes together (caudal posterior)
+caudal_posterior_distances <- Reduce(function(x, y) merge(x, y, by = "individual", all = TRUE), 
+                                       list(c_3_12_c_4_3, c_3_14_c_4_5, c_3_13_c_4_4))
+
+#calculate a mean
+caudal_posterior_distances <- 
+  caudal_posterior_distances %>%
+  group_by(individual) %>%
+  mutate(mean_distance_2 = ((log(euclidean_distance.x) + log(euclidean_distance.y) + log(euclidean_distance))/3))
+
+#combine mean of caudal distances
+caudal_intervertebral_distances <- caudal_anterior_distances %>%
+  dplyr::select(individual, mean_distance_1) %>%
+  inner_join(caudal_posterior_distances %>% dplyr::select(individual, mean_distance_2), by = "individual") %>%
+  mutate(caudal_intervertebral_distance = (mean_distance_1 + mean_distance_2) / 2)
+```
+
+```{r Merging Precaudal and Caudal IV Distances}
+intervertebral_distances <- 
+  precaudal_intervertebral_distances %>%
+  dplyr::select(individual, precaudal_intervertebral_distance) %>%
+  inner_join(caudal_intervertebral_distances %>% dplyr::select(individual, caudal_intervertebral_distance), by = "individual") %>%
+  mutate(species_name = str_extract(individual, "^[A-Za-z]+_[A-Za-z]+"),
+         species_name = gsub('_', " ", species_name))
+```
+
+```{r Export Intervertebral Distances}
+
+write.csv(intervertebral_distances, 'Data/intervertebral_distances.csv')
+
+```

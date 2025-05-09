@@ -1,0 +1,1156 @@
+---
+title: "Caudal Vertebrae Shape Analysis"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(geomorph) #for geometric morphometric analysis
+require(ape)
+require(ggplot2)
+library(ape)
+library(geiger)
+library(nlme)
+library(phytools)
+
+```
+
+```{r Import Data}
+
+caudal <- readland.tps("Data/caudal.tps",
+                              specID = c("ID")) #no curves
+#drop Chindongo elongatus (broken neural spines)
+caudal <- caudal[, , !grepl("Chindongo_elongatus_", dimnames(caudal)[[3]]), drop = FALSE]
+
+#drop hybrids
+caudal <- caudal[, , !grepl("M_zebra_", dimnames(caudal)[[3]]), drop = FALSE]
+
+
+species_data <- read.csv('Data/species_ecological_data.csv')
+```
+
+## Caudal Vertebrae (Procrustes Distances)
+
+```{r Procrustes Superimposition on Caudal Vertebrae}
+
+#general procrustes superimposition on all caudal coordinates
+gpa_caudal <- gpagen(caudal, max.iter = 100, ProcD = TRUE)
+
+#extract specimen IDs
+specimen_ids <- dimnames(gpa_caudal$coords)[[3]]  #extract specimen names
+species <- gsub("(^[A-Za-z]+_[a-z]+).*", "\\1", specimen_ids)  #extract Genus_species
+
+#filter for unique species
+unique_species <- unique(species)
+
+#create an empty array to store species mean shapes
+species_means <- array(NA, dim = c(dim(gpa_caudal$coords)[1], dim(gpa_caudal$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape
+for (i in seq_along(unique_species)) {
+  species_means[,,i] <- mshape(gpa_caudal$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means)[[3]] <- unique_species
+```
+
+```{r Plot all Aligned Caudal Landmarks}
+#this should pop-up a 3D plot of all of the aligned coordinates in X,Y,Z space
+plotAllSpecimens(gpa_caudal$coords, mean=TRUE, label=TRUE, plot_param = list(mean.col='red', txt.cex=2.00, txt.adj=5.00, txt.col='red'))
+```
+
+```{r Prune Tree and Reorder Data}
+
+#define the full tree
+tree <- read.tree(file='Data/Trees/phylogenies_mcgee_2020/phylogeny_mcgee_2020.tre')
+
+#remove _ from tip labels
+tree$tip.label <- gsub("_", " ", tree$tip.label)
+
+#replace underscores with spaces to match tree tip labels 
+dimnames(species_means)[[3]] <- gsub("_", " ", dimnames(species_means)[[3]])
+
+#extract species names
+tips_to_keep <- dimnames(species_means)[[3]]
+
+#prune tree to tips present within data:
+pruned_tree <- keep.tip(tree, intersect(tree$tip.label, tips_to_keep))
+
+#reorder species_means array to match that of phylogeny
+ordered_tips <- pruned_tree$tip.label
+
+#extract the current species order from the array
+current_order <- dimnames(species_means)[[3]]
+
+#create a reordering index
+reorder_index <- match(ordered_tips, current_order)
+
+#reorder the array along the third dimension
+species_means <- species_means[ , , reorder_index]
+
+#ipdate dimnames to match the new order
+dimnames(species_means)[[3]] <- ordered_tips
+```
+
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates}
+
+#perform PCA on species means 
+pca_caudal_procd <- gm.prcomp(species_means) #, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_caudal)
+```
+
+```{r Assemble PC Score Dataframe}
+
+#filter out Astatotilapia sp Ruaha Blue
+species_data <-
+  species_data %>%
+  filter(species_name != 'Astatotilapia sp Ruaha Blue', species_name != "Chindongo elongatus")
+
+#reorder dataframe to match the tips of the phylogeny
+species_data <- species_data[match(pruned_tree$tip.label, species_data$species_name), ]
+
+#append the PC scores to the ecomorphological data
+species_data <- 
+  species_data %>%
+  mutate(PC1 = pca_caudal$x[,1],
+         PC2 = pca_caudal$x[,2],
+         PC3 = pca_caudal$x[,3],
+         PC4 = pca_caudal$x[,4],
+         PC5 = pca_caudal$x[,5])
+```
+
+
+
+```{r Define Function to Extract Most Influential Coordinates}
+#function will identify and extract the top ten coordinates (X,Y,Z), and associated landmarks (1-27), contributing to each defined PC.
+extract_top_contributors <- function(pca_object, num_pcs = 4, top_n = 10) {
+  #define number of landmarks and coordinate system
+  num_landmarks <- 27  #27 for precaudal
+  num_coords <- 3  #X,Y,Z
+  
+  #generate landmark and coordinate mapping
+  landmark_indices <- rep(1:num_landmarks, each = num_coords)
+  coordinates <- rep(c("X", "Y", "Z"), times = num_landmarks)
+  
+  #initialize a list to store results
+  results <- list()
+  
+  for (pc in 1:num_pcs) {
+    #extract loadings for the current PC
+    pc_loadings <- pca_object$rotation[, pc]
+    abs_pc_loadings <- abs(pc_loadings) #using absolute to capture both positive and negative loadings 
+    
+    #sort by order of magnitude (regardless of +ve or -ve loading)
+    sorted_indices <- order(abs_pc_loadings, decreasing = TRUE)
+    
+    #extract top coordinates according to absolute loading, number is defined above (top_n) 
+    top_contributors <- sorted_indices[1:top_n]
+    
+    #assemble results into a dataframe for easy view
+    pc_df <- data.frame(
+      PC = rep(pc, top_n),
+      landmark = landmark_indices[top_contributors],
+      coordinate = coordinates[top_contributors],
+      loading = pc_loadings[top_contributors],
+      absolute_loading = abs_pc_loadings[top_contributors]
+    )
+    
+    # Store in results list
+    results[[paste0("PC", pc)]] <- pc_df
+  }
+  
+  #combine into a single dataframe
+  final_df <- do.call(rbind, results)
+  return(final_df)
+}
+
+```
+
+```{r Extract Influential Landmarks/Coordaintes (PC1-PC4)}
+#extract the most influential coordinates/landmarks for PC1:PC4 (collectively explains ~80% of variation)
+top_landmarks <- extract_top_contributors(pca_caudal_procd, num_pcs = 4, top_n = 10)
+
+#convert dataframe to a list of lists
+top_landmarks_list <- split(top_landmarks, top_landmarks$PC)
+names(top_landmarks_list) <- paste0("PC", names(top_landmarks_list))
+
+#access lists
+top_landmarks_list$PC1
+top_landmarks_list$PC2 
+top_landmarks_list$PC3
+top_landmarks_list$PC4
+#etc.
+```
+
+
+# Ecomorphological Grouping
+
+```{r Plot PC1 and PC2 According to Ecomorphology}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC1, PC2))
+
+#plot PC1 and PC2 and the convex hulls
+a1 <- ggplot(species_data, aes(x = PC1, y = PC2)) +
+  geom_polygon(data = hull_data, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC1 (42.75%)')+	
+  ylab('PC2 (26.70%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Caudal vertebrae')+
+  labs(fill = "Ecomorphology")
+a1
+
+
+ggsave("Figures/Caudal/caudal_pc1_pc2_ecomorphology.jpeg", a1, width = 25, height = 15, units = "cm")
+```
+
+```{r}
+#Fit MANOVA (ecomoephology ~ PC1+PC2)
+eco_manova_pc1_pc2 <- procD.lm(cbind(species_data$PC1, species_data$PC2) ~ species_data$ecomorphology, seed=1931, iter = 100000, effect.type = "cohen")
+summary(eco_manova_pc1_pc2) #p = 0.1065 (n.s.)
+
+
+#run pairwise comparisons anyway
+pairwise_results_eco1 <- pairwise(eco_manova_pc1_pc2, groups = species_data$ecomorphology)
+summary(pairwise_results_eco1)
+```
+
+
+
+```{r Plot PC2 and PC3 According to Ecomorphology}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC2, PC3))
+
+#plot PC2 and PC3 and the convex hulls
+a2 <- ggplot(species_data, aes(x = PC2, y = PC3)) +
+  geom_polygon(data = hull_data, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC2 (26.70%)')+
+  ylab('PC3 (7.611%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+  ggtitle('Caudal vertebrae')+
+  labs(fill = "Ecomorphology")
+a2
+
+
+ggsave("Figures/Caudal/caudal_pc2_pc3_ecomorphology.jpeg", a2, width = 25, height = 15, units = "cm")
+```
+
+```{r}
+#Fit MANOVA (depth_preference ~ PC2+PC3)
+eco_manova_pc2_pc3 <- procD.lm(cbind(species_data$PC2, species_data$PC3) ~ species_data$ecomorphology, seed=1931, iter = 100000, effect.type = "cohen")
+summary(eco_manova_pc2_pc3) #p = 0.1065 (n.s.)
+
+
+#run pairwise comparisons anyway
+pairwise_results_eco2 <- pairwise(eco_manova_pc2_pc3, groups = species_data$ecomorphology)
+summary(pairwise_results_eco2)
+```
+
+
+```{r Plot PC3 and PC4 According to Ecomorphology}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC3, PC4))
+
+#plot PC1 and PC2 and the convex hulls
+a3 <- ggplot(species_data, aes(x = PC3, y = PC4)) +
+  geom_polygon(data = hull_data, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC3 (7.61%)')+
+  ylab('PC4 (6.99%)')+ 
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+  ggtitle('Caudal vertebrae')+
+  labs(fill = "Ecomorphology")
+a3
+
+ggsave("Figures/Caudal/caudal_pc3_pc4_ecomorphology.jpeg", a3, width = 25, height = 15, units = "cm")
+```
+```{r}
+#Fit MANOVA (depth_preference ~ PC3+PC4)
+eco_manova_pc3_pc4 <- procD.lm(cbind(species_data$PC3, species_data$PC4) ~ species_data$ecomorphology, seed=1931, iter = 100000, effect.type = "cohen")
+summary(eco_manova_pc3_pc4) #p = 0.1065 (n.s.)
+
+
+#run pairwise comparisons anyway
+pairwise_results_eco3 <- pairwise(eco_manova_pc3_pc4, groups = species_data$ecomorphology)
+summary(pairwise_results_eco3)
+```
+
+
+# depth_preference Preference
+
+```{r Plot PC1 and PC2 According to depth_preference Preference}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(depth_preference) %>%
+  slice(chull(PC1, PC2))
+
+#plot PC1 and PC2 and the convex hulls
+b1 <- ggplot(species_data, aes(x = PC1, y = PC2)) +
+  geom_polygon(data = hull_data, aes(fill = depth_preference, group = depth_preference), alpha = 0.3)+ 
+  geom_point(aes(fill = depth_preference), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "benthopelagic" = "#4286DE",
+    "demersal" = "#FFC108",
+    "pelagic" = "#1E4C40"
+  ))+
+  xlab('PC1 (42.75%)')+	
+  ylab('PC2 (26.70%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+  ggtitle('Caudal vertebrae')+
+  labs(fill = "Bentho-pelagic axis position")
+b1
+
+ggsave("Figures/Caudal/caudal_pc1_pc2_depth_preference.jpeg", b1, width = 25, height = 15, units = "cm")
+```
+```{r MANOVA of depth_preference ~ PC1 + PC2 (Caudal Vertebrae)}
+#Fit MANOVA (depth_preference ~ PC1+PC2)
+depth_preference_manova_pc1_pc2 <- procD.lm(cbind(species_data$PC1, species_data$PC2) ~ species_data$depth_preference, seed=1931, iter = 100000, effect.type = "cohen")
+summary(depth_preference_manova_pc1_pc2)
+
+pairwise_results_depth_preference <- pairwise(depth_preference_manova_pc1_pc2, groups = species_data$depth_preference)
+summary(pairwise_results_depth_preference)
+```
+
+```{r Plot Effect Sizes for depth_preference (Precaudal - PC1, PC2)}
+#manually create a dataframe from pairwise results
+effect_size_df <- data.frame(
+  Comparison = c("BP-DE", 
+                 "BP-PE", 
+                 "DE-PE"),
+  Effect_Size = c(0.01990274, 0.06277501, 0.05658246),  #d-values
+  UCL_95 = c(0.03273093, 0.03917147, 0.03845068),  #Upper confidence limits
+  p_value = c(0.3355766442, 0.0003199968, 0.0010799892)  #p-values
+)
+
+b1a <- ggplot(effect_size_df, aes(x = Comparison, y = Effect_Size, fill = p_value < 0.05)) +
+  geom_col()+
+  geom_errorbar(aes(ymin = Effect_Size - UCL_95, ymax = Effect_Size + UCL_95), 
+                width = 0.2, color = "black")+
+  scale_fill_manual(values = c("red", "blue"), labels = c("Not Significant", "Significant"))+
+  labs(y = "Effect Size of PC1 + PC2 (d)",
+       x = 'Comparison',
+       fill = "Significance")+
+  theme_classic()+
+  theme(legend.position = "none",
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 0.00, vjust=0, hjust=0.50))
+
+b1a
+
+ggsave("Figures/Caudal/caudal_MANOVA_pc1_pc2_depth_preference_effect_size.jpeg", b1a, dpi=300, width = 10, height = 10, units = "cm")
+```
+```{r Plot PC2 and PC3 According to depth_preference Preference}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(depth_preference) %>%
+  slice(chull(PC2, PC3))
+
+#plot PC1 and PC2 and the convex hulls
+b2 <- ggplot(species_data, aes(x = PC2, y = PC3)) +
+  geom_polygon(data = hull_data, aes(fill = depth_preference, group = depth_preference), alpha = 0.3)+ 
+  geom_point(aes(fill = depth_preference), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "benthopelagic" = "#4286DE",
+    "demersal" = "#FFC108",
+    "pelagic" = "#1E4C40"
+  ))+
+  xlab('PC2 (26.70%)')+
+  ylab('PC3 (7.611%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+    ggtitle('Caudal vertebrae')+
+  labs(fill = "Bentho-pelagic axis position")
+b2
+
+ggsave("Figures/Caudal/caudal_pc2_pc3_depth_preference.jpeg", b2, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of depth_preference ~ PC2 + PC3 (Caudal Vertebrae)}
+#Fit MANOVA (depth_preference ~ PC2+PC3)
+depth_preference_manova_pc2_pc3 <- procD.lm(cbind(species_data$PC2, species_data$PC3) ~ species_data$depth_preference, seed=1931, iter = 100000, effect.type = "cohen")
+summary(depth_preference_manova_pc2_pc3) #p = 0.1065 (n.s.)
+
+#run pairwise comparisons anyway
+pairwise_results_depth_preference <- pairwise(depth_preference_manova_pc2_pc3, groups = species_data$depth_preference)
+summary(pairwise_results_depth_preference)
+```
+
+```{r Plot Effect Sizes for depth_preference (Precaudal - PC2, PC3)}
+#manually create a dataframe from pairwise results
+effect_size_df <- data.frame(
+  Comparison = c("BP-DE", 
+                 "BP-PE", 
+                 "DE-PE"),
+  Effect_Size = c(0.01776088, 0.01301459, 0.02913704),  #d-values
+  UCL_95 = c(0.02394581, 0.02854242, 0.02806272),  #Upper confidence limits
+  p_value = c(0.16967830, 0.48549515, 0.04080959)  #p-values
+)
+
+b1b <- ggplot(effect_size_df, aes(x = Comparison, y = Effect_Size, fill = p_value < 0.05)) +
+  geom_col()+
+  geom_errorbar(aes(ymin = Effect_Size - UCL_95, ymax = Effect_Size + UCL_95), 
+                width = 0.2, color = "black")+
+  scale_fill_manual(values = c("red", "blue"), labels = c("Not Significant", "Significant"))+
+  labs(y = "Effect Size of PC2 + PC3 (d)",
+       x = 'Comparison',
+       fill = "Significance")+
+  theme_classic()+
+  theme(legend.position = "right",
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(angle = 0.00, vjust=0, hjust=0.50))
+
+b1b
+
+ggsave("Figures/Caudal/caudal_MANOVA_pc2_pc3_depth_preference_effect_size.jpeg", b1b, dpi=300, width = 10, height = 10, units = "cm")
+```
+```{r Plot PC3 and PC4 According to depth_preference Preference}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(depth_preference) %>%
+  slice(chull(PC3, PC4))
+
+#plot PC1 and PC2 and the convex hulls
+b3 <- ggplot(species_data, aes(x = PC3, y = PC4)) +
+  geom_polygon(data = hull_data, aes(fill = depth_preference, group = depth_preference), alpha = 0.3)+ 
+  geom_point(aes(fill = depth_preference), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+   scale_fill_manual(values = c(
+    "benthopelagic" = "#4286DE",
+    "demersal" = "#FFC108",
+    "pelagic" = "#1E4C40"
+  ))+
+  xlab('PC3 (7.61%)')+
+  ylab('PC4 (6.99%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+    ggtitle('Caudal vertebrae')+
+  labs(fill = "Bentho-pelagic axis position")
+b3
+
+ggsave("Figures/Caudal/caudal_pc3_pc4_depth_preference.jpeg", b3, width = 25, height = 15, units = "cm")
+```
+```{r MANOVA of depth_preference ~ PC3 + PC4 (Precaudal Vertebrae)}
+#Fit MANOVA (depth_preference ~ PC1+PC2)
+depth_preference_manova_pc3_pc4 <- procD.lm(cbind(species_data_filtered$PC3, species_data_filtered$PC4) ~ species_data_filtered$depth_preference, seed=1931, iter = 100000, effect.type = "cohen")
+summary(depth_preference_manova_pc3_pc4) #p = 0.1787 (n.s.)
+
+
+
+#run pairwise comparisons anyway
+pairwise_results_depth_preference <- pairwise(depth_preference_manova_pc3_pc4, groups = species_data_filtered$depth_preference)
+summary(pairwise_results_depth_preference)
+```
+
+
+# Piscivory
+
+```{r Plot PC1 and PC2 According to Piscivory}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(piscivore) %>%
+  slice(chull(PC1, PC2))
+
+#plot PC1 and PC2 and the convex hulls
+c1 <- ggplot(species_data, aes(x = PC1, y = PC2)) +
+  geom_polygon(data = hull_data, aes(fill = piscivore, group = piscivore), alpha = 0.3)+ 
+  geom_point(aes(fill = piscivore), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "piscivore" = "#932CE7",
+    "non-piscivore" = "#296218"
+  ))+
+  xlab('PC1 (42.75%)')+	
+  ylab('PC2 (26.70%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+    ggtitle('Caudal vertebrae')+
+  labs(fill = 'Piscivory')
+c1
+
+ggsave("Figures/Caudal/caudal_pc1_pc2_piscivore.jpeg", c1, width = 25, height = 15, units = "cm")
+```
+```{r MANOVA of Piscivory ~ PC1 + PC2 (Caudal Vertebrae)}
+#Fit MANOVA (depth_preference ~ PC1+PC2)
+piscivore_manova_pc1_pc2 <- procD.lm(cbind(species_data$PC1, species_data$PC2) ~ species_data$piscivore, seed=1931, iter = 100000, effect.type = "cohen")
+summary(piscivore_manova_pc1_pc2)
+
+pairwise_results_piscivore <- pairwise(piscivore_manova_pc1_pc2, groups = species_data$piscivore)
+summary(pairwise_results_piscivore)
+```
+
+```{r Plot PC2 and PC3 According to Piscivory}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(piscivore) %>%
+  slice(chull(PC2, PC3)) 
+
+#plot PC1 and PC2 and the convex hulls
+c2 <- ggplot(species_data, aes(x = PC2, y = PC3)) +
+  geom_polygon(data = hull_data, aes(fill = piscivore, group = piscivore), alpha = 0.3)+ 
+  geom_point(aes(fill = piscivore), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "piscivore" = "#932CE7",
+    "non-piscivore" = "#296218"
+  ))+
+  xlab('PC2 (26.70%)')+
+  ylab('PC3 (7.611%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Caudal vertebrae')+
+  labs(fill = 'Piscivory')
+c2
+
+ggsave("Figures/Caudal/caudal_pc2_pc3_piscivore.jpeg", c2, width = 25, height = 15, units = "cm")
+```
+
+```{r MANOVA of Piscivory ~ PC2 + PC3 (Caudal Vertebrae)}
+#Fit MANOVA (depth_preference ~ PC1+PC2)
+piscivore_manova_pc2_pc3 <- procD.lm(cbind(species_data$PC2, species_data$PC3) ~ species_data$piscivore, seed=1931, iter = 100000, effect.type = "cohen")
+summary(piscivore_manova_pc2_pc3)
+
+pairwise_results_piscivore <- pairwise(piscivore_manova_pc2_pc3, groups = species_data$piscivore)
+summary(pairwise_results_piscivore)
+```
+
+```{r Plot PC3 and PC4 According to Piscivory}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data <- species_data %>%
+  group_by(piscivore) %>%
+  slice(chull(PC3, PC4))
+
+#plot PC1 and PC2 and the convex hulls
+c3 <- ggplot(species_data, aes(x = PC3, y = PC4)) +
+  geom_polygon(data = hull_data, aes(fill = piscivore, group = piscivore), alpha = 0.3)+ 
+  geom_point(aes(fill = piscivore), shape = 21, size = 3, color = "black")+
+  geom_text(aes(label = species_name), size = 1.5, vjust = -0.5)+ #add species names
+  scale_fill_manual(values = c(
+    "piscivore" = "#932CE7",
+    "non-piscivore" = "#296218"
+  ))+
+  xlab('PC3 (7.61%)')+
+  ylab('PC4 (6.99%)')+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+  theme_classic()+
+  theme(legend.position = 'right')+
+   ggtitle('Caudal vertebrae')+
+  labs(fill = 'Piscivory')
+c3
+
+ggsave("Figures/Caudal/caudal_pc3_pc4_piscivore.jpeg", c3, width = 25, height = 15, units = "cm")
+```
+```{r MANOVA of Piscivory ~ PC2 + PC3 (Caudal Vertebrae)}
+#Fit MANOVA (depth_preference ~ PC1+PC2)
+piscivore_manova_pc3_pc4 <- procD.lm(cbind(species_data$PC3, species_data$PC4) ~ species_data$piscivore, seed=1931, iter = 100000, effect.type = "cohen")
+summary(piscivore_manova_pc3_pc4)
+
+pairwise_results_piscivore <- pairwise(piscivore_manova_pc3_pc4, groups = species_data$piscivore)
+summary(pairwise_results_piscivore)
+```
+
+
+```{r Calculate Mean Shape for Caudal Vertebrae}
+#calculate mean shape for all species
+mean_shape <- mshape(gpa_caudal$coords)
+```
+
+```{r Plot Highest PC1 species against Mean}
+#extract mean precaudal coordinates for L. gossei (loads most positively on PC1)
+species_coordinates <- species_means[, , 'Lethrinops gossei']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("red")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Lethrinops gossei together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 1.00, gridPars = gP,
+               label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Lowest PC1 species against Mean}
+#extract mean precaudal coordinates for L. gossei (loads most positively on PC1)
+species_coordinates <- species_means[, , 'Rhamphochromis longiceps']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("blue")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Lethrinops gossei together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+               label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Highest PC2 species against Mean}
+#extract mean precaudal coordinates for Placidochromis johnstoni (loads most positively on PC2)
+species_coordinates <- species_means[, , 'Tyrannochromis macrostoma']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("red")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Nimbochromis livingstonii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Lowest PC2 species against Mean}
+#extract mean precaudal coordinates for Placidochromis johnstoni (loads most positively on PC2)
+species_coordinates <- species_means[, , 'Nimbochromis livingstonii']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("blue")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Nimbochromis livingstonii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Highest PC3 species against Mean}
+#extract mean precaudal coordinates for Placidochromis johnstoni (loads most positively on PC2)
+species_coordinates <- species_means[, , 'Genyochromis mento']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("red")) #this will plot the points for the selected species shape as red, the mean will be grey.
+
+#plot the mean shape and shape for Nimbochromis livingstonii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+```{r Plot Highest PC3 species against Mean}
+#extract mean precaudal coordinates for Placidochromis johnstoni (loads most positively on PC2)
+species_coordinates <- species_means[, , 'Diplotaxodon limnothrissa']
+
+#dsefine the graphical parameters with gridPar
+gP <- gridPar(tar.pt.bg = c("blue")) #this will plot the points for the selected species shape as blue, the mean will be grey.
+
+#plot the mean shape and shape for Nimbochromis livingstonii together
+plotRefToTarget(mean_shape, species_coordinates, method = 'points', mag = 2.00, gridPars = gP,
+                label = TRUE) #label adds landmark labels, mag is the a multipler to see how different the shape is higher = more exaggerated shape difference for simpler visualisation
+```
+
+## trying to plot the principle compinents
+
+```{r}
+
+#vertebral aspect ratios
+vertebral_aspect_ratios <- read.csv('Data/vertebral_aspect_ratios.csv')
+
+#import all species data
+all_species_data <- readRDS('Data/all_species.rds')
+```
+
+```{r Summarise Vertebral Aspect Ratio}
+
+#calculate species averages regardless of caudal or precaudal
+vertebral_aspect_ratios_species <- 
+  vertebral_aspect_ratios %>%
+  group_by(species_name) %>%
+  summarise(mean_vertebral_raw_aspect_ratio = mean(raw_aspect_ratio, na.rm=TRUE),
+            mean_vertebral_ln_length_ln_width = mean(ln_length_ln_width))
+
+#calculate species average for both precaudal and caudal vertebrae
+vertebral_aspect_ratios_domain_species <- 
+  vertebral_aspect_ratios %>%
+  group_by(species_name, domain) %>%
+  summarise(mean_vertebral_raw_aspect_ratio = mean(raw_aspect_ratio, na.rm=TRUE),
+            mean_vertebral_ln_length_ln_width = mean(ln_length_ln_width))
+```
+
+```{r Define Model to Fit OLS and Multiple PGLS Models}
+fit_pgls_models <- function(data, response, predictor, interaction = NULL, model_type = "additive") {
+  if (model_type == "interaction" && !is.null(interaction)) {
+    #interaction model
+    formula <- as.formula(paste(response, "~", predictor, "*", interaction))
+  } else if (model_type == "additive" && !is.null(interaction)) {
+    #additive model
+    formula <- as.formula(paste(response, "~", predictor, "+", interaction))
+  } else {
+    #simple model with only the predictor
+    formula <- as.formula(paste(response, "~", predictor))
+  }
+  
+  #fit the models
+  all.ols <- lm(data = data$data, formula)
+  all.pgls.fixed <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 1.00)
+  all.pgls.lambda <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 1.00)
+  all.pgls.delta <- caper::pgls(formula, data, lambda = 1.00, delta = 'ML', kappa = 1.00)
+  all.pgls.kappa <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 1.00)
+  all.pgls.lambda.kappa <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.kappa.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 'ML')
+  
+  #store model fits into a list
+  model_fits <- list(all.ols, 
+                     all.pgls.fixed, 
+                     all.pgls.lambda, 
+                     all.pgls.delta, 
+                     all.pgls.kappa,
+                     all.pgls.lambda.delta,
+                     all.pgls.lambda.kappa,
+                     all.pgls.lambda.kappa.delta)
+  
+  #compare the models using AIC
+  aic_values <- AIC(all.ols, 
+                    all.pgls.fixed, 
+                    all.pgls.lambda, 
+                    all.pgls.delta, 
+                    all.pgls.kappa,
+                    all.pgls.lambda.delta,
+                    all.pgls.lambda.kappa,
+                    all.pgls.lambda.kappa.delta)
+  
+  #return both the model fits and AIC values
+  results <- list(
+    model_fits = model_fits,
+    aic_values = aic_values
+  )
+  
+  return(results)
+}
+```
+
+```{r Construct VCV Matrix for Downstream Analysis}
+#construct the variance-covariance (VCV) matrix:
+vcv_matrix <- caper::comparative.data(pruned_tree, combined_data, species_name, vcv=TRUE, vcv.dim=3)
+```
+
+```{r}
+#vertebral_aspect ratio ~ total count
+#vertebral_aspect_ratio_total_count <- 
+ # fit_pgls_models(vcv_matrix, "mean_vertebral_ln_length_ln_width", "total_count")
+#saveRDS(vertebral_aspect_ratio_total_count, 'Data/vertebral_aspect_ratio_total_count.rds')
+
+#summary(vertebral_aspect_ratio_total_count$model_fits[[8]])
+
+#vertebral aspect ratio ~ whole body aspect ratio
+#vertebral_and_body_aspect_ratio <- fit_pgls_models(vcv_matrix, "mean_vertebral_ln_length_ln_width", "ln_length_ln_width")
+#saveRDS(vertebral_and_body_aspect_ratio, 'Data/vertebral_and_body_aspect_ratio.rds')
+
+#whole body aspect ratio ~ total vertebral count + vertebral aspect ratio (additive model)
+#body_aspect_ratio_total_count_vertebral_aspect_ratio_additive <- fit_pgls_models(vcv_matrix, "ln_length_ln_width", "total_count", interaction = "mean_vertebral_ln_length_ln_width", model_type = "additive")
+#saveRDS(body_aspect_ratio_total_count_vertebral_aspect_ratio_additive, 'Data/body_aspect_ratio_total_count_vertebral_aspect_ratio_additive.rds')
+```
+
+
+```{r Tree Pruning and Data Subsetting}
+#specify tree
+tree <- all_species_data$tree
+
+#sort out species names to match phylogeny
+vertebral_aspect_ratios_species$species_name <- gsub('_', " ", vertebral_aspect_ratios_species$species_name)
+
+#filter out hybrids and Astatotilapia sp. 'Ruaha blue'
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis'))
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, vertebral_aspect_ratios_species_filtered$species_name)
+
+#reorder dataframe so that species order matches order of phylogeny tips
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species_filtered %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count_data to species present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% vertebral_aspect_ratios_species_filtered$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, vertebral_aspect_ratios_species_filtered, by='species_name')
+
+#reorder the new damn dataframe
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+```
+
+
+```{r}
+## adidng the necessary data to merged data 
+
+merged<- species_data
+merged
+ln_aspect_ratio<- dplyr::select(combined_data, ln_length_ln_width, species_name)
+
+mean_vertebral_ln_length_ln_width <- vertebral_aspect_ratios_species_filtered$mean_vertebral_ln_length_ln_width
+mean_vertebral_ln_length_ln_width
+
+merged$mean_vertebral_ln_length_ln_width <- c(mean_vertebral_ln_length_ln_width, rep(NA, nrow(merged) - length(mean_vertebral_ln_length_ln_width)))
+merged$ln_mean_intervertebral_distance <- combineddata_species_filtered$ln_mean_intervertebral_distance
+merged <- merged[1:44, ]
+merged$ln_mean_intervertebral_distance <- combineddata_species_filtered$ln_mean_intervertebral_distance
+merged <- left_join(merged, 
+                    dplyr::select(combineddata_species_filtered, species_name, ecomorphology), 
+                    by = "species_name")
+
+
+merged <- merged[, !duplicated(names(merged))]
+
+merged<- merged %>% 
+  rename(
+    ecomorphology = ecomorphology.x)
+
+merged
+prec
+# okay cool - now gotta plpt yaya
+```
+
+## plotitng principle componens and aspect ratio against each other
+
+
+```{r}
+#import the tree from the all_species_data object
+tree <- all_species_data$tree
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, intervertebral_distances_species$species_name)
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count data to species for which we have IVD data and present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% intervertebral_distances_species$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, intervertebral_distances_species, by='species_name')
+
+#reorder the new damn dataframe to match order of tips in phylogeny
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+
+name.check(merged, tree) # checking names match betree trees and dataframe 
+```
+
+
+
+```{r}
+ggplot(merged, aes(x = ln_length_ln_width, y = PC1, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+ggplot(merged, aes(x = PC2, y = ln_length_ln_width, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+
+ggplot(merged, aes(x = PC3, y = ln_length_ln_width, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+
+# now need to regress and phylogenetically correlate aspect ratio to observe these results better 
+
+# need to perform a linear regression model, then move on and do mor
+# should do a t test to see if tis correlation is actually important
+```
+
+```{r}
+## linear models 
+pc1mod <- lm(ln_length_ln_width ~ PC1, merged)
+pc2mod <- lm(ln_length_ln_width ~ PC2, merged)
+pc3mod <- lm(ln_length_ln_width ~ PC3, merged)
+
+summary(pc1mod)
+summary(pc2mod)
+summary(pc3mod)
+
+```
+
+## generating intercept only model
+
+```{r}
+
+BAR_io_model <- gls(ln_length_ln_width ~ 1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+
+summary(BAR_io_model)
+
+merged$BAR_io_residuals <- BAR_io_model$residuals
+
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+ggplot(merged, aes(x = PC1, y = BAR_io_residuals, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+BAR_residuals_pgls_mod <- gls(BAR_io_residuals ~ PC1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+
+merged$BAR_residuals <- BAR_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(BAR_residuals_pgls_mod)[1]
+slope <- coef(BAR_residuals_pgls_mod)[2]
+
+summary_mod <- summary(BAR_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+c2 <- ggplot(merged, aes(x = PC1, y = BAR_residuals, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('ln Body aspect ratio residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+  theme_minimal()
+
+c2
+ggsave("Figures/PC1BAR.jpeg", c2, width = 20, height = 15, units = "cm")
+
+## OMG perfect - BAR residuals actualy plotted pretty well yay
+# perfect - now do again for PC2 and PC3 
+```
+
+```{r}
+## Mean aspect ratio against PCQ
+mean_AR_io_model <- gls(mean_vertebral_ln_length_ln_width ~ 1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+
+summary(mean_AR_io_model)
+
+merged$mean_AR_io_residuals <- mean_AR_io_model$residuals[1:nrow(merged)]
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+
+ggplot(merged, aes(x = PC1, y = mean_AR_io_residuals)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+mean_AR_residuals_pgls_mod <- gls(mean_AR_io_residuals ~ PC1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+
+merged$mean_AR_residuals <- mean_AR_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(mean_AR_residuals_pgls_mod)[1]
+slope <- coef(mean_AR_residuals_pgls_mod)[2]
+
+summary_mod <- summary(mean_AR_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+gg <- ggplot(merged, aes(x = PC1, y = mean_AR_residuals, colour = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('ln Mean centrum aspect ratio residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+  theme_minimal()
+
+gg
+ggsave("Figures/PC1AR.jpeg", gg, width = 20, height = 15, units = "cm")
+
+```
+
+
+```{r}
+## mean intervertebral distances now 
+
+## Mean intervertebral distances and tings
+mean_IVD_io_model <- gls(
+ln_mean_intervertebral_distance ~ 1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+
+
+
+summary(mean_IVD_io_model)
+
+merged$mean_IVD_io_residuals <- mean_IVD_io_model$residuals
+
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+merged
+
+ggplot(merged, aes(x = PC1, y = mean_IVD_io_residuals)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+mean_IVD_residuals_pgls_mod <- gls(mean_IVD_io_residuals ~ PC1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+
+merged$mean_IVD_residuals <- mean_IVD_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(mean_IVD_residuals_pgls_mod)[1]
+slope <- coef(mean_IVD_residuals_pgls_mod)[2]
+
+summary_mod <- summary(mean_IVD_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+xy<- ggplot(merged, aes(x = PC1, y = mean_IVD_residuals, colour = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('Mean IVD residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+  theme_minimal()
+
+xy
+ggsave("Figures/PC1IVD.jpeg", xy, width = 20, height = 15, units = "cm")
+```
+
+
+
+
+```{r}
+## PGLS model for comparing PC1 and aspect ratio
+AR <- merged$ln_length_ln_width
+PC1 <- merged$PC1
+
+pglsModel1 <- gls(ln_length_ln_width ~ PC1, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+summary(pglsModel)
+
+plot(pglsModel)
+
+## PGLS model for PC2
+
+AR <- merged$ln_length_ln_width
+PC2 <- merged$PC2
+
+pglsModel2 <- gls(ln_length_ln_width ~ PC2, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+summary(pglsModel)
+
+plot(pglsModel2)
+
+## PGLS model fro PC3
+
+AR <- merged$ln_length_ln_width
+PC3 <- merged$PC3
+
+pglsModel3 <- gls(ln_length_ln_width ~ PC3, correlation = corBrownian(phy = tree),
+    data = merged, method = "ML")
+summary(pglsModel)
+
+plot(pglsModel3)
+
+# the data is a bit weird and freky - not orking at all
+
+```
+

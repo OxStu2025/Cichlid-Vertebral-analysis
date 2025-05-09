@@ -1,0 +1,1049 @@
+---
+title: "PC1 anlaysi - precaudal and caudl final"
+output: html_document
+date: "2025-04-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(geomorph) #for geometric morphometric analysis
+require(ape)
+require(ggplot2)
+library(ape)
+library(geiger)
+library(nlme)
+library(phytools)
+library(dplyr)
+
+```
+
+## ive gotta sort this properly by precaudal and caudal actually 
+
+## for caudal vertebrae - 
+
+```{r}
+caudal <- readland.tps("Data/caudal.tps",
+                              specID = c("ID")) #no curves
+#drop Chindongo elongatus (broken neural spines)
+caudal <- caudal[, , !grepl("Chindongo_elongatus_", dimnames(caudal)[[3]]), drop = FALSE]
+
+#drop hybrids
+caudal <- caudal[, , !grepl("M_zebra_", dimnames(caudal)[[3]]), drop = FALSE]
+
+
+species_data <- read.csv('Data/species_ecological_data.csv')
+```
+
+```{r}
+#general procrustes superimposition on all caudal coordinates
+gpa_caudal <- gpagen(caudal, max.iter = 100, ProcD = TRUE)
+
+#extract specimen IDs
+specimen_ids <- dimnames(gpa_caudal$coords)[[3]]  #extract specimen names
+species <- gsub("(^[A-Za-z]+_[a-z]+).*", "\\1", specimen_ids)  #extract Genus_species
+
+#filter for unique species
+unique_species <- unique(species)
+
+#create an empty array to store species mean shapes
+species_means <- array(NA, dim = c(dim(gpa_caudal$coords)[1], dim(gpa_caudal$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape
+for (i in seq_along(unique_species)) {
+  species_means[,,i] <- mshape(gpa_caudal$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means)[[3]] <- unique_species
+```
+
+```{r}
+# extracting vertebral aspect ratios
+
+caudal_data <- vertebral_aspect_ratios_clean %>% filter(domain == "caudal")
+precaudal_data <- vertebral_aspect_ratios_clean %>% filter(domain == "precaudal")
+
+caudal_data <- caudal_data %>%
+  mutate(species_name = case_when(
+    species_name %in% c("M_zebra", "Maylandia_zebra") ~ "Maylandia_zebra",
+    TRUE ~ species_name
+  ))
+
+caudal_data<- caudal_data %>%
+  group_by(species_name) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+caudal <- caudal[, , !grepl("M_zebra_", dimnames(caudal)[[3]]), drop = FALSE]
+
+caudal_data
+```
+
+```{r}
+# extracting vertebral aspect ratios
+precaudal_data <- precaudal_data %>%
+  mutate(species_name = case_when(
+    species_name %in% c("M_zebra", "Maylandia_zebra") ~ "Maylandia_zebra",
+    TRUE ~ species_name
+  ))
+
+precaudal_data<- precaudal_data %>%
+  group_by(species_name) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+precaudal <- precaudal[, , !grepl("M_zebra_", dimnames(caudal)[[3]]), drop = FALSE]
+
+precaudal_data
+```
+
+# now estracting intervertebral distances
+
+```{r}
+
+caudal_iv <- intervertebral_distances_species_precaudal_caudal %>% filter(domain == "Caudal")
+precaudal_iv <- intervertebral_distances_species_precaudal_caudal %>% filter(domain == "Precaudal")
+
+## taking ln of these diatnces
+
+caudal_iv$distances <- abs(caudal_iv$distances )
+caudal_iv$ln_distances <-log(caudal_iv$distances)
+
+precaudal_iv$distances <- abs(precaudal_iv$distances )
+precaudal_iv$ln_distances <-log(precaudal_iv$distances)
+
+## intergeating ln intervertebral distances
+```
+
+```{r}
+# incorperating ecomorpgologucal data 
+
+caudal_data <- caudal_data %>%
+  mutate(species_name = str_replace_all(species_name, "_", " "),
+         species_name = str_trim(str_to_sentence(species_name)))
+
+species_data <- species_data %>%
+  mutate(species_name = str_replace_all(species_name, "_", " "),
+         species_name = str_trim(str_to_sentence(species_name)))
+
+caudal_data <- caudal_data %>%
+  left_join(species_data %>% dplyr::select(species_name, ecomorphology), by = "species_name") %>%
+  arrange(species_name)
+
+caudal_data
+
+# precaudal
+
+precaudal_data <- precaudal_data %>%
+  mutate(species_name = str_replace_all(species_name, "_", " "),
+         species_name = str_trim(str_to_sentence(species_name)))
+
+species_data <- species_data %>%
+  mutate(species_name = str_replace_all(species_name, "_", " "),
+         species_name = str_trim(str_to_sentence(species_name)))
+
+precaudal_data <- precaudal_data %>%
+  left_join(species_data %>% dplyr::select(species_name, ecomorphology), by = "species_name") %>%
+  arrange(species_name)
+
+precaudal_data
+```
+
+
+
+```{r}
+## now adding interverterbal distances
+caudal_iv <- caudal_iv %>%
+         mutate(species_name = str_trim(str_to_sentence(species_name)))
+precaudal_iv <- precaudal_iv %>%
+         mutate(species_name = str_trim(str_to_sentence(species_name)))
+
+caudal_data <- caudal_data %>%
+  left_join(
+    precaudal_iv %>% dplyr::select(species_name, ln_distances),
+    by = "species_name"
+  )
+
+precaudal_data <- precaudal_data %>%
+  left_join(
+    precaudal_iv %>% dplyr::select(species_name, ln_distances),
+    by = "species_name"
+  )
+```
+
+```{r}
+# finally adding body aspect ratios 
+
+combineddata_species_filtered<- combineddata_species_filtered%>%
+         mutate(species_name = str_trim(str_to_sentence(species_name)))
+
+combineddata_species_filtered
+
+precaudal_data <- precaudal_data %>%
+  left_join(
+    combineddata_species_filtered %>% dplyr::select(species_name, mean_ln_standard_length),
+    by = "species_name"
+  )
+caudal_data <- caudal_data %>%
+  left_join(
+    combineddata_species_filtered %>% dplyr::select(species_name, mean_ln_standard_length),
+    by = "species_name"
+  )
+
+caudal_data
+precaudal_data
+
+## perfect - got all the data 
+```
+
+## plotting caudal data aginst PC1
+
+```{r}
+pca_scores <- as.data.frame(pca_caudal$x[, 1:5])
+pca_scores<-tibble::rownames_to_column(pca_scores, "species_name") 
+pca_scores<- pca_scores%>%
+         mutate(species_name = str_trim(str_to_sentence(species_name)))
+
+pca_scores <- pca_scores %>%
+  rename(PC1 = Comp1,
+         PC2 = Comp2,
+         PC3 = Comp3, 
+         PC4 = Comp4,
+         PC5 = Comp5)
+
+pca_scores
+
+caudal_data <- caudal_data %>%
+  left_join(
+    pca_scores %>% dplyr::select(species_name, PC1, PC2, PC3, PC4),
+    by = "species_name"
+  )
+caudal_data<- na.omit(caudal_data)
+caudal_data
+```
+
+## caudal model and pGLS generation
+
+```{r Define Model to Fit OLS and Multiple PGLS Models}
+fit_pgls_models <- function(data, response, predictor, interaction = NULL, model_type = "additive") {
+  if (model_type == "interaction" && !is.null(interaction)) {
+    #interaction model
+    formula <- as.formula(paste(response, "~", predictor, "*", interaction))
+  } else if (model_type == "additive" && !is.null(interaction)) {
+    #additive model
+    formula <- as.formula(paste(response, "~", predictor, "+", interaction))
+  } else {
+    #simple model with only the predictor
+    formula <- as.formula(paste(response, "~", predictor))
+  }
+  
+  #fit the models
+  all.ols <- lm(data = data$data, formula)
+  all.pgls.fixed <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 1.00)
+  all.pgls.lambda <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 1.00)
+  all.pgls.delta <- caper::pgls(formula, data, lambda = 1.00, delta = 'ML', kappa = 1.00)
+  all.pgls.kappa <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 1.00)
+  all.pgls.lambda.kappa <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.kappa.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 'ML')
+  
+  #store model fits into a list
+  model_fits <- list(all.ols, 
+                     all.pgls.fixed, 
+                     all.pgls.lambda, 
+                     all.pgls.delta, 
+                     all.pgls.kappa,
+                     all.pgls.lambda.delta,
+                     all.pgls.lambda.kappa,
+                     all.pgls.lambda.kappa.delta)
+  
+  #compare the models using AIC
+  aic_values <- AIC(all.ols, 
+                    all.pgls.fixed, 
+                    all.pgls.lambda, 
+                    all.pgls.delta, 
+                    all.pgls.kappa,
+                    all.pgls.lambda.delta,
+                    all.pgls.lambda.kappa,
+                    all.pgls.lambda.kappa.delta)
+  
+  #return both the model fits and AIC values
+  results <- list(
+    model_fits = model_fits,
+    aic_values = aic_values
+  )
+  
+  return(results)
+}
+```
+
+```{r Construct VCV Matrix for Downstream Analysis}
+#construct the variance-covariance (VCV) matrix:
+vcv_matrix <- caper::comparative.data(pruned_tree, combined_data, species_name, vcv=TRUE, vcv.dim=3)
+```
+
+```{r Tree Pruning and Data Subsetting}
+#specify tree
+tree <- all_species_data$tree
+
+#sort out species names to match phylogeny
+vertebral_aspect_ratios_species$species_name <- gsub('_', " ", vertebral_aspect_ratios_species$species_name)
+
+#filter out hybrids and Astatotilapia sp. 'Ruaha blue'
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis'))
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, vertebral_aspect_ratios_species_filtered$species_name)
+
+#reorder dataframe so that species order matches order of phylogeny tips
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species_filtered %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count_data to species present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% vertebral_aspect_ratios_species_filtered$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, vertebral_aspect_ratios_species_filtered, by='species_name')
+
+#reorder the new damn dataframe
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+```
+
+
+```{r Prune Tree and Reorder Data}
+
+#define the full tree
+tree <- read.tree(file='Data/Trees/phylogenies_mcgee_2020/phylogeny_mcgee_2020.tre')
+
+#remove _ from tip labels
+tree$tip.label <- gsub("_", " ", tree$tip.label)
+
+#replace underscores with spaces to match tree tip labels 
+dimnames(species_means)[[3]] <- gsub("_", " ", dimnames(species_means)[[3]])
+
+#extract species names
+tips_to_keep <- dimnames(species_means)[[3]]
+
+#prune tree to tips present within data:
+pruned_tree <- keep.tip(tree, intersect(tree$tip.label, tips_to_keep))
+
+#reorder species_means array to match that of phylogeny
+ordered_tips <- pruned_tree$tip.label
+
+#extract the current species order from the array
+current_order <- dimnames(species_means)[[3]]
+
+#create a reordering index
+reorder_index <- match(ordered_tips, current_order)
+
+#reorder the array along the third dimension
+species_means <- species_means[ , , reorder_index]
+
+#ipdate dimnames to match the new order
+dimnames(species_means)[[3]] <- ordered_tips
+```
+
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates}
+
+#perform PCA on species means 
+pca_caudal_procd <- gm.prcomp(species_means) #, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_caudal)
+```
+```{r}
+#import the tree from the all_species_data object
+tree <- all_species_data$tree
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, intervertebral_distances_species$species_name)
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count data to species for which we have IVD data and present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% intervertebral_distances_species$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, intervertebral_distances_species, by='species_name')
+
+#reorder the new damn dataframe to match order of tips in phylogeny
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+
+name.check(merged, tree) # checking names match betree trees and dataframe 
+```
+
+## test plots - for caudal
+
+```{r}
+ggplot(caudal_data, aes(x = ln_length_ln_width, y = PC1, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+ggplot(caudal_data, aes(x = ln_length_ln_width, y = PC2, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+
+ggplot(caudal_data, aes(x = ln_length_ln_width, y = PC3, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+```
+```{r}
+## linear models 
+pc1mod <- lm(ln_length_ln_width ~ PC1, caudal_data)
+pc2mod <- lm(ln_length_ln_width ~ PC2, caudal_data)
+pc3mod <- lm(ln_length_ln_width ~ PC3, caudal_data)
+
+summary(pc1mod)
+summary(pc2mod)
+summary(pc3mod)
+```
+
+
+# plotting body aspect rediausl model
+
+```{r}
+BAR_io_model <- gls(mean_ln_standard_length ~ 1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = caudal_data, method = "ML")
+
+summary(BAR_io_model)
+
+caudal_data$BAR_io_residuals <- BAR_io_model$residuals
+
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+ggplot(caudal_data, aes(x = PC1, y = BAR_io_residuals, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+BAR_residuals_pgls_mod <- gls(BAR_io_residuals ~ PC1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = caudal_data, method = "ML")
+
+caudal_data$BAR_residuals <- BAR_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(BAR_residuals_pgls_mod)[1]
+slope <- coef(BAR_residuals_pgls_mod)[2]
+
+var_fitted <- var(predict(BAR_residuals_pgls_mod))
+var_total <- var(caudal_data$BAR_io_residuals, na.rm = TRUE)
+pseudo_R2 <- var_fitted / var_total
+
+summary_mod <- summary(BAR_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+c2 <- ggplot(caudal_data, aes(x = PC1, y = BAR_residuals)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('ln [Body aspect ratio] residuals')+
+    annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+  theme_classic()+
+    ggtitle('Caudal vertebrae - ln[Body length residuals] ~ PC1')+
+      theme_classic()+
+    theme(plot.title = element_text(colour = "black", size=22))+
+   geom_point(aes(fill = ecomorphology), shape = 21, size = 4, color = "black")
+
+c2
+ggsave("Figures/PC1BAR_caudal.jpeg", c2, width = 23, height = 15, units = "cm")
+
+## OMG perfect - BAR residuals actualy plotted pretty well yay
+# perfect - now do again for PC2 and PC3 
+```
+
+
+```{r}
+## Mean aspect ratio against PCQ
+mean_AR_io_model <- gls(ln_length_ln_width ~ 1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = caudal_data, method = "ML")
+
+
+summary(mean_AR_io_model)
+
+caudal_data$mean_AR_io_residuals <- mean_AR_io_model$residuals[1:nrow(caudal_data)]
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+
+ggplot(caudal_data, aes(x = PC1, y = mean_AR_io_residuals)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+mean_AR_residuals_pgls_mod <- gls(mean_AR_io_residuals ~ PC1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = caudal_data, method = "ML")
+
+caudal_data$mean_AR_residuals <- mean_AR_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(mean_AR_residuals_pgls_mod)[1]
+slope <- coef(mean_AR_residuals_pgls_mod)[2]
+
+summary_mod <- summary(mean_AR_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+gg <- ggplot(caudal_data, aes(x = PC1, y = mean_AR_residuals)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('ln [Mean centrum aspect ratio] residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+  theme_classic()+
+  ggtitle('Caudal vertebrae - ln[mean centrum aspect ratio residuals] ~ PC1')+
+    theme_classic()+
+    theme(plot.title = element_text(colour = "black", size=16))+
+   geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")
+
+gg
+ggsave("Figures/PC1AR_caudal.jpeg", gg, width = 23, height = 15, units = "cm")
+
+```
+
+```{r}
+## Mean intervertebral distances and tings
+mean_IVD_io_model <- gls(
+ln_distances ~ 1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = caudal_data, method = "ML")
+
+summary(mean_IVD_io_model)
+
+caudal_data$mean_IVD_io_residuals <- mean_IVD_io_model$residuals
+
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+caudal_data
+
+ggplot(caudal_data, aes(x = PC1, y = mean_IVD_io_residuals)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+mean_IVD_residuals_pgls_mod <- gls(mean_IVD_io_residuals ~ PC1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = caudal_data, method = "ML")
+
+caudal_data$mean_IVD_residuals <- mean_IVD_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(mean_IVD_residuals_pgls_mod)[1]
+slope <- coef(mean_IVD_residuals_pgls_mod)[2]
+
+summary_mod <- summary(mean_IVD_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+xy<- ggplot(caudal_data, aes(x = PC1, y = mean_IVD_residuals)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('Mean IVD residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+    ggtitle('Caudal vertebrae - Mean[ln IVD ditances] ~ PC1')+
+    theme_classic()+
+    theme(plot.title = element_text(colour = "black", size=22.5))+
+   geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")
+
+xy
+ggsave("Figures/PC1IVD_caudal.jpeg", xy, width = 23, height = 15, units = "cm")
+
+```
+
+
+
+### RUNNING THE SAME FOR PRECAUDAL VERTEBRAE ###
+
+
+```{r}
+## the same for the preprecaudal vertebrae
+
+#general procrustes superimposition on all preprecaudal coordinates
+gpa_preprecaudal <- gpagen(precaudal, max.iter = 100, ProcD = TRUE)
+
+#extract specimen IDs
+specimen_ids <- dimnames(gpa_preprecaudal$coords)[[3]]  #extract specimen names
+species <- gsub("(^[A-Za-z]+_[a-z]+).*", "\\1", specimen_ids)  #extract Genus_species
+
+#filter for unique species
+unique_species <- unique(species)
+
+#create an empty array to store species mean shapes
+species_means <- array(NA, dim = c(dim(gpa_preprecaudal$coords)[1], dim(gpa_preprecaudal$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape
+for (i in seq_along(unique_species)) {
+  species_means[,,i] <- mshape(gpa_preprecaudal$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means)[[3]] <- unique_species
+```
+
+## plotting precaudal data aginst PC1
+
+```{r}
+pca_scores <- as.data.frame(pca_precaudal$x[, 1:5])
+pca_scores<-tibble::rownames_to_column(pca_scores, "species_name") 
+pca_scores<- pca_scores%>%
+         mutate(species_name = str_trim(str_to_sentence(species_name)))
+
+pca_scores <- pca_scores %>%
+  rename(PC1 = Comp1,
+         PC2 = Comp2,
+         PC3 = Comp3, 
+         PC4 = Comp4,
+         PC5 = Comp5)
+
+pca_scores
+
+precaudal_data <- precaudal_data %>%
+  left_join(
+    pca_scores %>% dplyr::select(species_name, PC1, PC2, PC3, PC4),
+    by = "species_name"
+  )
+
+precaudal_data<- na.omit(precaudal_data)
+precaudal_data
+```
+
+## precaudal model and pGLS generation
+
+```{r Define Model to Fit OLS and Multiple PGLS Models}
+fit_pgls_models <- function(data, response, predictor, interaction = NULL, model_type = "additive") {
+  if (model_type == "interaction" && !is.null(interaction)) {
+    #interaction model
+    formula <- as.formula(paste(response, "~", predictor, "*", interaction))
+  } else if (model_type == "additive" && !is.null(interaction)) {
+    #additive model
+    formula <- as.formula(paste(response, "~", predictor, "+", interaction))
+  } else {
+    #simple model with only the predictor
+    formula <- as.formula(paste(response, "~", predictor))
+  }
+  
+  #fit the models
+  all.ols <- lm(data = data$data, formula)
+  all.pgls.fixed <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 1.00)
+  all.pgls.lambda <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 1.00)
+  all.pgls.delta <- caper::pgls(formula, data, lambda = 1.00, delta = 'ML', kappa = 1.00)
+  all.pgls.kappa <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 1.00)
+  all.pgls.lambda.kappa <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.kappa.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 'ML')
+  
+  #store model fits into a list
+  model_fits <- list(all.ols, 
+                     all.pgls.fixed, 
+                     all.pgls.lambda, 
+                     all.pgls.delta, 
+                     all.pgls.kappa,
+                     all.pgls.lambda.delta,
+                     all.pgls.lambda.kappa,
+                     all.pgls.lambda.kappa.delta)
+  
+  #compare the models using AIC
+  aic_values <- AIC(all.ols, 
+                    all.pgls.fixed, 
+                    all.pgls.lambda, 
+                    all.pgls.delta, 
+                    all.pgls.kappa,
+                    all.pgls.lambda.delta,
+                    all.pgls.lambda.kappa,
+                    all.pgls.lambda.kappa.delta)
+  
+  #return both the model fits and AIC values
+  results <- list(
+    model_fits = model_fits,
+    aic_values = aic_values
+  )
+  
+  return(results)
+}
+```
+
+```{r Construct VCV Matrix for Downstream Analysis}
+#construct the variance-covariance (VCV) matrix:
+vcv_matrix <- caper::comparative.data(pruned_tree, combined_data, species_name, vcv=TRUE, vcv.dim=3)
+```
+
+```{r Tree Pruning and Data Subsetting}
+#specify tree
+tree <- all_species_data$tree
+
+#sort out species names to match phylogeny
+vertebral_aspect_ratios_species$species_name <- gsub('_', " ", vertebral_aspect_ratios_species$species_name)
+
+#filter out hybrids and Astatotilapia sp. 'Ruaha blue'
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis'))
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, vertebral_aspect_ratios_species_filtered$species_name)
+
+#reorder dataframe so that species order matches order of phylogeny tips
+vertebral_aspect_ratios_species_filtered <- 
+  vertebral_aspect_ratios_species_filtered %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count_data to species present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% vertebral_aspect_ratios_species_filtered$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, vertebral_aspect_ratios_species_filtered, by='species_name')
+
+#reorder the new damn dataframe
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+```
+
+
+```{r Prune Tree and Reorder Data}
+
+#define the full tree
+tree <- read.tree(file='Data/Trees/phylogenies_mcgee_2020/phylogeny_mcgee_2020.tre')
+
+#remove _ from tip labels
+tree$tip.label <- gsub("_", " ", tree$tip.label)
+
+#replace underscores with spaces to match tree tip labels 
+dimnames(species_means)[[3]] <- gsub("_", " ", dimnames(species_means)[[3]])
+
+#extract species names
+tips_to_keep <- dimnames(species_means)[[3]]
+
+#prune tree to tips present within data:
+pruned_tree <- keep.tip(tree, intersect(tree$tip.label, tips_to_keep))
+
+#reorder species_means array to match that of phylogeny
+ordered_tips <- pruned_tree$tip.label
+
+#extract the current species order from the array
+current_order <- dimnames(species_means)[[3]]
+
+#create a reordering index
+reorder_index <- match(ordered_tips, current_order)
+
+#reorder the array along the third dimension
+species_means <- species_means[ , , reorder_index]
+
+#ipdate dimnames to match the new order
+dimnames(species_means)[[3]] <- ordered_tips
+```
+
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates}
+
+#perform PCA on species means 
+pca_precaudal_procd <- gm.prcomp(species_means) #, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_precaudal)
+```
+```{r}
+#import the tree from the all_species_data object
+tree <- all_species_data$tree
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, intervertebral_distances_species$species_name)
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count data to species for which we have IVD data and present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% intervertebral_distances_species$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, intervertebral_distances_species, by='species_name')
+
+#reorder the new damn dataframe to match order of tips in phylogeny
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+
+name.check(merged, tree) # checking names match betree trees and dataframe 
+```
+
+## test plots - for precaudal
+
+```{r}
+ggplot(precaudal_data, aes(x = ln_length_ln_width, y = PC1, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+ggplot(precaudal_data, aes(x = ln_length_ln_width, y = PC2, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+
+ggplot(precaudal_data, aes(x = ln_length_ln_width, y = PC3, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+```
+```{r}
+## linear models 
+pc1mod <- lm(ln_length_ln_width ~ PC1, precaudal_data)
+pc2mod <- lm(ln_length_ln_width ~ PC2, precaudal_data)
+pc3mod <- lm(ln_length_ln_width ~ PC3, precaudal_data)
+
+summary(pc1mod)
+summary(pc2mod)
+summary(pc3mod)
+```
+
+
+# plotting body aspect rediausl model
+
+```{r}
+
+BAR_io_model <- gls(mean_ln_standard_length ~ 1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = precaudal_data, method = "ML")
+
+summary(BAR_io_model)
+
+precaudal_data$BAR_io_residuals <- BAR_io_model$residuals
+
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+ggplot(precaudal_data, aes(x = PC1, y = BAR_io_residuals, color = ecomorphology)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+BAR_residuals_pgls_mod <- gls(BAR_io_residuals ~ PC1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = precaudal_data, method = "ML")
+
+precaudal_data$BAR_residuals <- BAR_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(BAR_residuals_pgls_mod)[1]
+slope <- coef(BAR_residuals_pgls_mod)[2]
+
+var_fitted <- var(predict(BAR_residuals_pgls_mod))
+var_total <- var(precaudal_data$BAR_io_residuals, na.rm = TRUE)
+pseudo_R2 <- var_fitted / var_total
+
+summary_mod <- summary(BAR_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+c2 <- ggplot(precaudal_data, aes(x = PC1, y = BAR_residuals)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('ln [Body aspect ratio] residuals')+
+    annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+    ggtitle('Precaudal vertebrae - ln[Body length] ~ PC1')+
+      theme_classic()+
+    theme(plot.title = element_text(colour = "black", size=24.0))+
+   geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")
+
+
+c2
+ggsave("Figures/PC1BAR_precaudal.jpeg", c2, width = 23, height = 15, units = "cm")
+
+## OMG perfect - BAR residuals actualy plotted pretty well yay
+# perfect - now do again for PC2 and PC3 
+```
+
+
+```{r}
+## Mean aspect ratio against PCQ
+mean_AR_io_model <- gls(ln_length_ln_width ~ 1, 
+                        correlation = corBrownian(phy = tree, form = ~species_name),
+                        data = precaudal_data, 
+                        method = "ML")
+
+summary(mean_AR_io_model)
+
+precaudal_data$mean_AR_io_residuals <- mean_AR_io_model$residuals[1:nrow(precaudal_data)]
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+
+ggplot(precaudal_data, aes(x = PC1, y = mean_AR_io_residuals)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1
+
+
+mean_AR_residuals_pgls_mod <- gls(
+  mean_AR_io_residuals ~ PC1,
+  correlation = corBrownian(phy = tree, form = ~species_name),
+  data = precaudal_data,
+  method = "ML"
+)
+
+precaudal_data$mean_AR_residuals <- mean_AR_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(mean_AR_residuals_pgls_mod)[1]
+slope <- coef(mean_AR_residuals_pgls_mod)[2]
+
+summary_mod <- summary(mean_AR_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+gg <- ggplot(precaudal_data, aes(x = PC1, y = mean_AR_residuals)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('ln [Mean centrum aspect ratio] residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+    ggtitle('Preaudal vertebrae - ln[Mean centrum aspect ratios] ~ PC1')+
+    theme_classic()+
+    theme(plot.title = element_text(colour = "black", size=18))+
+   geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")
+
+gg
+ggsave("Figures/PC1AR_precaudal.jpeg", gg, width = 23, height = 15, units = "cm")
+
+```
+
+```{r}
+## Mean intervertebral distances and tings
+mean_IVD_io_model <- gls(
+ln_distances ~ 1,  correlation = corBrownian(phy = tree, form = ~species_name),
+    data = precaudal_data, method = "ML")
+
+precaudal_data$mean_IVD_io_residuals <- mean_IVD_io_model$residuals
+
+## now we have the phylogenetically correct residuals 
+## plot thee against PC1
+
+str(precaudal_data)
+
+ggplot(precaudal_data, aes(x = PC1, y = mean_IVD_io_residuals)) +
+  geom_point() +
+  geom_abline(intercept = coef(pglsModel)[1], slope = coef(pglsModel)[2])
+
+##no creating a general PGLS model for the object residuals against PC1 - matching tip labels correctly
+
+mean_IVD_residuals_pgls_mod <- gls(
+  mean_IVD_io_residuals ~ PC1,
+  correlation = corBrownian(phy = tree, form = ~species_name),
+  data = precaudal_data,
+  method = "ML"
+)
+
+precaudal_data$mean_IVD_residuals <- mean_IVD_residuals_pgls_mod$residuals
+
+
+## PLotting the intercept and aming it correct 
+
+intercept <- coef(mean_IVD_residuals_pgls_mod)[1]
+slope <- coef(mean_IVD_residuals_pgls_mod)[2]
+
+summary_mod <- summary(mean_IVD_residuals_pgls_mod)
+slope_estimate <- summary_mod$tTable["PC1", "Value"]
+p_value <- summary_mod$tTable["PC1", "p-value"]
+sig_label <- paste0("Slope = ", round(slope_estimate, 3), 
+                    ", p = ", signif(p_value, 3))
+
+xy<- ggplot(precaudal_data, aes(x = PC1, y = mean_IVD_residuals)) +
+  geom_point() +
+  geom_abline(intercept = intercept, slope = slope, linetype = "dashed") +
+    xlab('PC1')+ 
+  ylab('Mean IVD residuals')+
+  annotate("text", x = Inf, y = Inf, label = sig_label, 
+           hjust = 1.1, vjust = 2, size = 4) +
+   ggtitle('Precaudal vertebrae - Mean[ln IVD ditances] ~ PC1')+
+   geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  theme_classic()+
+  theme(plot.title = element_text(colour = "black", size = 21))
+ 
+xy
+ggsave("Figures/PC1IVD_precaudal.jpeg", xy, width = 23, height = 15, units = "cm")
+
+```
+
+
+
+

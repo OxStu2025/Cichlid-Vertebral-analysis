@@ -1,0 +1,89 @@
+---
+title: "Importing Coordinate Data"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(jsonlite) #for importing json files
+```
+
+```{r Define File Paths for all JSON Files}
+
+#set directory path
+directory_path <- "Data/Vertebrae Coordinates (Json)/Tropheops_tropheops_NHMUK_2012_1_17_18_25_8bit_b"
+
+
+#get all JSON files recursively (since folders are all nested)
+json_files <- list.files(directory_path, pattern = "\\.json$", full.names = TRUE, recursive = TRUE)
+
+#find files with spaces in their names
+files_with_spaces <- json_files[grepl(" ", basename(json_files))]
+any(files_with_spaces)
+```
+
+```{r}
+read_json_data <- function(file) {
+  # Attempt to read JSON file
+  data <- tryCatch(fromJSON(file), error = function(e) return(NULL))
+  
+  #check json imported correctly, if not return NULL
+  if (is.null(data) || is.null(data$markups)) return(NULL)
+
+  #extract list that contains the coordinates data (see above)
+  markups_df <- data$markups
+
+  #check that the data is there, if not return NULL
+  if (is.null(markups_df$controlPoints) || length(markups_df$controlPoints) == 0) return(NULL)
+
+  #extract the coordinates
+  control_points_df <- markups_df$controlPoints[[1]]
+  #convert to a dataframe so that we can mutate it more easily
+  if (!is.data.frame(control_points_df)) {
+    control_points_df <- as.data.frame(control_points_df)
+  }
+  
+  #ensure 'position' exists and is structured properly
+  if (!"position" %in% names(control_points_df) || is.null(control_points_df$position)) return(NULL)
+  
+  #output the dataframe with the x,y,z coordinates and add the file_name as well (which is accurate)
+  control_points_df <- control_points_df %>%
+    mutate(
+      x = sapply(position, function(p) if (!is.null(p)) p[1] else NA),
+      y = sapply(position, function(p) if (!is.null(p)) p[2] else NA),
+      z = sapply(position, function(p) if (!is.null(p)) p[3] else NA)
+    ) %>%
+    select(label, x, y, z) %>%  #keep only landmark coordinates and label (inherited from json file but these are messy)
+    mutate(file_name = basename(file),
+           specimen = sub("_lm.*", "", basename(file)) #also add specimen information
+  )
+  return(control_points_df)
+}
+```
+
+```{r Extract Landmark Coordinate Data from JSON Files}
+#apply the function to all JSON files and combine into one data frame
+coordinate_data <- bind_rows(lapply(json_files, read_json_data))
+
+#check for duplicates
+duplicates <- coordinate_data$file_name[duplicated(coordinate_data$file_name)]
+
+#export the landmark coordinate data as a .csv file
+write.csv(coordinate_data, "Data/TT_compiled_landmark_coordinates.csv")
+
+
+
+#summary to check for missing landmarks/specimens:
+summary <- coordinate_data %>%
+  group_by(specimen) %>%
+  summarise(n_landmarks = n()) %>%
+  filter(n_landmarks != 17 & n_landmarks != 27)
+```
+

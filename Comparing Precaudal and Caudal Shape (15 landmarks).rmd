@@ -1,0 +1,232 @@
+---
+title: "Comparing Precaudal and Caudal Shape (15 landmarks)"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(geomorph) #for geometric morphometric analysis
+require(ape)
+require(ggplot2)
+require(gridExtra)
+```
+
+```{r Import Data}
+
+#import the precaudal tps file
+precaudal <- readland.tps("Data/precaudal.tps",
+                              specID = c("ID"), readcurves = TRUE)
+#limit to first 15 landmarks shared by both precaudal and caudal
+precaudal <- precaudal[1:15, , ]
+
+#import the caudal tps file
+caudal <- readland.tps("Data/caudal.tps", specID = c("ID"))
+#limit to first 15 landmarks shared by both precaudal and caudal
+caudal <- caudal[1:15, , ]
+
+#import the species ecological data
+species_data <- read.csv('Data/species_ecological_data.csv')
+```
+
+```{r Procrustes Superimposition on Precaudal and Caudal Vertebrae}
+
+#general procrustes superimposition on all caudal coordinates
+gpa_caudal <- gpagen(caudal, max.iter = 100, ProcD = TRUE)
+gpa_precaudal <- gpagen(precaudal, max.iter = 100, ProcD = TRUE)
+```
+
+```{r Extract Specimen IDs and Species Names}
+#extract specimen IDs
+specimen_ids <- dimnames(gpa_caudal$coords)[[3]]  #extract specimen names
+species <- gsub("(^[A-Za-z]+_[a-z]+).*", "\\1", specimen_ids)  #extract Genus_species
+
+#filter for unique species
+unique_species <- unique(species)
+```
+
+```{r Create Mean Data Arrays for Precaudal Vertebrae}
+#create an empty array to store species mean shapes (precaudal)
+species_means_precaudal <- array(NA, dim = c(dim(gpa_precaudal$coords)[1], dim(gpa_precaudal$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape (precaudal)
+for (i in seq_along(unique_species)) {
+  species_means_precaudal[,,i] <- mshape(gpa_precaudal$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means_precaudal)[[3]] <- unique_species
+```
+
+```{r Create Mean Data Arrays for Caudal Vertebrae}
+
+#create an empty array to store species mean shapes (Caudal)
+species_means_caudal <- array(NA, dim = c(dim(gpa_caudal$coords)[1], dim(gpa_caudal$coords)[2], length(unique_species)))
+
+#loop through species and compute mean shape (caudal)
+for (i in seq_along(unique_species)) {
+  species_means_caudal[,,i] <- mshape(gpa_caudal$coords[,,species == unique_species[i]]) #mshape is a function in geomorph that estimates mean shape for a set of ALIGNED specimens.
+}
+
+#assign species names to the array
+dimnames(species_means_caudal)[[3]] <- unique_species
+```
+
+```{r Plot all Aligned Preaudal Landmarks}
+#this should pop-up a 3D plot of all of the aligned coordinates in X,Y,Z space
+plotAllSpecimens(gpa_precaudal$coords, mean=TRUE, label=TRUE, plot_param = list(mean.col='red', txt.cex=2.00, txt.adj=5.00, txt.col='red'))
+```
+
+```{r Plot all Aligned Caudal Landmarks}
+#this should pop-up a 3D plot of all of the aligned coordinates in X,Y,Z space
+plotAllSpecimens(gpa_caudal$coords, mean=TRUE, label=TRUE, plot_param = list(mean.col='red', txt.cex=2.00, txt.adj=5.00, txt.col='red'))
+```
+
+```{r Prune Tree and Reorder Data}
+
+#define the full tree
+tree <- read.tree(file='Data/Trees/phylogenies_mcgee_2020/phylogeny_mcgee_2020.tre')
+
+#remove _ from tip labels
+tree$tip.label <- gsub("_", " ", tree$tip.label)
+
+#replace underscores with spaces to match tree tip labels 
+dimnames(species_means_precaudal)[[3]] <- gsub("_", " ", dimnames(species_means_precaudal)[[3]])
+
+#extract species names
+tips_to_keep <- dimnames(species_means_precaudal)[[3]]
+
+#prune tree to tips present within data:
+pruned_tree <- keep.tip(tree, intersect(tree$tip.label, tips_to_keep))
+
+#reorder species_means_precaudal array to match that of phylogeny
+ordered_tips <- pruned_tree$tip.label
+
+#extract the current species order from the array
+current_order <- dimnames(species_means_precaudal)[[3]]
+
+#create a reordering index
+reorder_index <- match(ordered_tips, current_order)
+
+#reorder the array along the third dimension
+species_means_precaudal <- species_means_precaudal[ , , reorder_index]
+species_means_caudal <- species_means_caudal[ , , reorder_index]
+
+#ipdate dimnames to match the new order
+dimnames(species_means_precaudal)[[3]] <- ordered_tips
+dimnames(species_means_caudal)[[3]] <- ordered_tips
+```
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates (Preaudal)}
+
+#perform PCA on species means 
+pca_precaudal <- gm.prcomp(species_means_precaudal, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_precaudal)
+```
+
+```{r Phylogenetic PCA of Mean Aligned Coordinates (Caudal)}
+
+#perform PCA on species means 
+pca_caudal <- gm.prcomp(species_means_caudal, phy=pruned_tree, GLS=TRUE) #Revel 2009
+summary(pca_caudal)
+```
+
+```{r Assemble PC Score Dataframe}
+
+#filter out Astatotilapia sp Ruaha Blue
+species_data <-
+  species_data %>%
+  filter(species_name != 'Astatotilapia sp Ruaha Blue')
+
+#reorder dataframe to match the tips of the phylogeny
+species_data <- species_data[match(pruned_tree$tip.label, species_data$species_name), ]
+
+#append the PC scores to the ecomorphological data
+species_data <- 
+  species_data %>%
+  mutate(PC1_precaudal = pca_precaudal$x[,1],
+         PC2_precaudal = pca_precaudal$x[,2],
+         PC3_precaudal = pca_precaudal$x[,3],
+         PC4_precaudal = pca_precaudal$x[,4],
+         PC5_precaudal = pca_precaudal$x[,5],
+         PC1_caudal = pca_caudal$x[,1],
+         PC2_caudal = pca_caudal$x[,2],
+         PC3_caudal = pca_caudal$x[,3],
+         PC4_caudal = pca_caudal$x[,4],
+         PC5_caudal = pca_caudal$x[,5])
+```
+
+```{r Plot PC1 and PC2 According to Ecomorphology (Precaudal)}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data_precaudal <- species_data %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC1_precaudal, PC2_precaudal))
+
+#plot PC1 and PC2 and the convex hulls
+a1 <- ggplot(species_data, aes(x = PC1_precaudal, y = PC2_precaudal)) +
+  geom_polygon(data = hull_data_precaudal, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC1')+
+  ylab('PC2')+
+  #geom_text(aes(label = species_name), size = 3, vjust = -0.5)+ #add species names
+  theme_classic()+
+  theme(legend.position = 'right')
+a1
+
+ggsave("Figures/precaudal_pc1_pc2_ecomorphology_15_lms.pdf", a1, width = 15, height = 10, units = "cm")
+```
+
+```{r Plot PC1 and PC2 According to Ecomorphology (Caudal)}
+
+#define the convex hull (i.e. morphospace occupied by each ecomorpholoy)
+hull_data_caudal <- species_data %>%
+  group_by(ecomorphology) %>%
+  slice(chull(PC1_caudal, PC2_caudal))
+
+#plot PC1 and PC2 and the convex hulls
+a2 <- ggplot(species_data, aes(x = PC1_caudal, y = PC2_caudal)) +
+  geom_polygon(data = hull_data_caudal, aes(fill = ecomorphology, group = ecomorphology), alpha = 0.3)+ 
+  geom_point(aes(fill = ecomorphology), shape = 21, size = 3, color = "black")+
+  geom_vline(xintercept=0.00, linetype='dotdash')+ #mean is at 0,0
+  geom_hline(yintercept=0.00, linetype='dotdash')+
+   scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  xlab('PC1')+
+  ylab('PC2')+
+  geom_text(aes(label = species_name), size = 3, vjust = -0.5)+ #add species names
+  theme_classic()+
+  theme(legend.position = 'right')
+a2
+
+ggsave("Figures/caudal_pc1_pc2_ecomorphology_15_lms.pdf", a2, width = 15, height = 10, units = "cm")
+```
+
+
+
+
+

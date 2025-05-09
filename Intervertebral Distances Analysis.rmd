@@ -1,0 +1,949 @@
+---
+title: "Intervertebral Distances Analysis"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #data wrangling
+library(tidyr) #data wrangling
+require(stringr) #useful string manipulation
+require(ggplot2) #data visualisation and plotting
+require(ape) #phylogenetic tree plotting and manipulation
+require(caper) #phylogenetic generalised least squares (PGLS) regression
+require(phytools) #phylogenetic ANOVA
+library(phytools)
+#install.packages('car')
+#install.packages('ggpubr')
+```
+
+```{r Import Data}
+#intervertebral distances
+intervertebral_distances <- read.csv('Data/intervertebral_distances.csv')
+
+#import all species data
+all_species_data <- readRDS('Data/all_species.rds')
+
+#import specimen length data
+specimen_lengths <- read.csv("Data/specimen_lengths.csv")
+
+species_data <- read.csv('C:/Users/Hannah/Desktop/spine stuff/Regionalisation II/Data/species_data.csv')
+
+```
+
+```{r Group IVD by Species}
+#collapse into averages for species (note this is only really for the benefit of A. calli and D. macrops with multiple specimens)
+intervertebral_distances_species <- 
+  intervertebral_distances %>%
+  group_by(species_name) %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra', "Aulonocara nyassae","Stigmatochromis macrorhynchos", "Tramitichromis brevis")) %>% #filter out hybrids ('M zebra') and Astatotilapia sp. 'Ruaha blue' (Astatotilapia sp)
+  summarise(precaudal_intervertebral_distance = mean(precaudal_intervertebral_distance, na.rm=TRUE),
+            caudal_intervertebral_distance = mean(caudal_intervertebral_distance, na.rm=TRUE),
+            mean_intervertebral_distance = ((precaudal_intervertebral_distance + caudal_intervertebral_distance)/2)) #calculate a mean of the precaudal and caudal intervertebral distances
+
+```
+
+```{r}
+#import the tree from the all_species_data object
+tree <- all_species_data$tree
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, intervertebral_distances_species$species_name)
+
+##add count data (including body aspect ratios) to the vertebral aspect ratio subsetted data
+#define count_data dataframe
+count_data <- as.data.frame(all_species_data$matrix_data)
+#inherit species_name from rownames (originally a matrix)
+count_data <- count_data %>%
+  mutate(species_name = rownames(count_data))
+
+#subset count data to species for which we have IVD data and present in pruned tree
+filtered_count_data <- 
+  count_data %>%
+  filter(species_name %in% intervertebral_distances_species$species_name)
+
+#merge aspect ratio and count data based on 'species_name' column
+combined_data <- merge(filtered_count_data, intervertebral_distances_species, by='species_name')
+
+#reorder the new damn dataframe to match order of tips in phylogeny
+combined_data <- 
+  combined_data %>%
+  arrange(match(species_name, pruned_tree$tip.label))
+
+#add rownames to make downstream analysis easier
+rownames(combined_data) <- combined_data$species_name
+```
+
+
+```{r Group Specimen Lengths by Species}
+#collapse into averages for species (note this is only really for the benefit of A. calli and D. macrops with multiple specimens)
+specimen_lengths_species <- 
+  specimen_lengths %>%
+  group_by(species_name) %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis')) %>%
+  summarise(mean_ln_standard_length = mean(ln_standard_length, na.rm = TRUE))
+
+#which species are missing?
+missing_values <- setdiff(intervertebral_distances_species$species_name,
+                          specimen_lengths_species$species_name)
+
+#reorder specimen_lengths_species to match rownames of combined_data
+specimen_lengths_species <- specimen_lengths_species %>%
+  arrange(match(species_name, rownames(combined_data)))
+
+#add mean_ln_standard_length to combined_data dataframe
+combined_data$mean_ln_standard_length <- specimen_lengths_species$mean_ln_standard_length
+
+```
+
+```{r Define Model to Fit OLS and Multiple PGLS Models}
+fit_pgls_models <- function(data, response, predictor, interaction = NULL, model_type = "additive") {
+  if (model_type == "interaction" && !is.null(interaction)) {
+    #interaction model
+    formula <- as.formula(paste(response, "~", predictor, "*", interaction))
+  } else if (model_type == "additive" && !is.null(interaction)) {
+    #additive model
+    formula <- as.formula(paste(response, "~", predictor, "+", interaction))
+  } else {
+    #simple model with only the predictor
+    formula <- as.formula(paste(response, "~", predictor))
+  }
+  
+  #fit the models
+  all.ols <- lm(data = data$data, formula)
+  all.pgls.fixed <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 1.00)
+  all.pgls.lambda <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 1.00)
+  all.pgls.delta <- caper::pgls(formula, data, lambda = 1.00, delta = 'ML', kappa = 1.00)
+  all.pgls.kappa <- caper::pgls(formula, data, lambda = 1.00, delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 1.00)
+  all.pgls.lambda.kappa <- caper::pgls(formula, data, lambda = 'ML', delta = 1.00, kappa = 'ML')
+  all.pgls.lambda.kappa.delta <- caper::pgls(formula, data, lambda = 'ML', delta = 'ML', kappa = 'ML')
+  
+  #store model fits into a list
+  model_fits <- list(all.ols, 
+                     all.pgls.fixed, 
+                     all.pgls.lambda, 
+                     all.pgls.delta, 
+                     all.pgls.kappa,
+                     all.pgls.lambda.delta,
+                     all.pgls.lambda.kappa,
+                     all.pgls.lambda.kappa.delta)
+  
+  #compare the models using AIC
+  aic_values <- AIC(all.ols, 
+                    all.pgls.fixed, 
+                    all.pgls.lambda, 
+                    all.pgls.delta, 
+                    all.pgls.kappa,
+                    all.pgls.lambda.delta,
+                    all.pgls.lambda.kappa,
+                    all.pgls.lambda.kappa.delta)
+  
+  #return both the model fits and AIC values
+  results <- list(
+    model_fits = model_fits,
+    aic_values = aic_values
+  )
+  
+  return(results)
+}
+```
+
+```{r}
+
+combined_data$scaled_fishlength_meanIVdistances <- combined_data$mean_intervertebral_distance - (combined_data$mean_ln_standard_length - combined_data$mean_intervertebral_distance)
+combined_data <- combined_data %>%
+  dplyr::left_join(species_data %>% 
+                     dplyr::select(species_name, ecomorphology),
+            by = "species_name")
+```
+
+
+```{r Construct VCV Matrix for PGLS Models}
+#construct the variance-covariance (VCV) matrix:
+vcv_matrix <- caper::comparative.data(pruned_tree, combined_data, species_name, vcv=TRUE, vcv.dim=3)
+```
+
+
+```{r IVD ~ Specimen Length}
+#IVD ~ Specimen Length
+IVD_specimen_length <- 
+  fit_pgls_models(vcv_matrix, "scaled_fishlength_meanIVdistances", "mean_ln_standard_length") #log-log
+saveRDS(IVD_specimen_length, 'Data/IVD_specimen_length.rds')
+
+#output AIC values (should really be using AICc when sample size is low)
+IVD_specimen_length$aic_values #OLS model fine to use (indistinguishable from best fitting PGLS models)
+
+#output summary of the OLS model:
+summary(IVD_specimen_length$model_fits[[1]])
+
+combined_data
+
+#plot a scatterplot
+a1 <- ggplot(combined_data, aes(x=mean_ln_standard_length, y=scaled_fishlength_meanIVdistances))+
+  geom_point(size=2.00)+
+  geom_abline(intercept=IVD_specimen_length$model_fits[[1]]$coefficients[[1]], 
+              slope = IVD_specimen_length$model_fits[[1]]$coefficients[[2]], 
+              size = 0.75, colour = 'black', linetype = 'solid') + #OLS is black
+  ylab("mean ln[scaledIntervertebral Distance]")+
+  xlab("mean ln[Specimen Length]")+
+  theme_classic()
+a1
+
+## thsi one has been reently scaled and standardised 
+## IGNORE THHIS ONE IS HAS NOT BEEN SCALED
+```
+
+
+```{r}
+## now analysing the residuals for this data -shows how much of the variation is explained by other sources or whetever
+
+# residuasl should be nromally distributed on a QQ plot
+
+IVD_lm<-lm(scaled_fishlength_meanIVdistances ~ mean_ln_standard_length, combined_data) 
+
+
+combined_data$predicted <- predict(IVD_lm)   # Save the predicted values
+combined_data$residuals <- residuals(IVD_lm) 
+
+ggplot(combined_data, aes(x=mean_ln_standard_length, y=scaled_fishlength_meanIVdistances)) +
+  geom_smooth(method = "lm", se = FALSE, color = "lightgrey") +     # regression line  
+  geom_segment(aes(xend = mean_ln_standard_length, yend = predicted), alpha = .2) +      # draw line from point to line
+  geom_point(aes(color = abs(residuals), size = abs(residuals))) +  # size of the points
+  scale_color_continuous(low = "green", high = "red") +             # colour of the points mapped to residual size - green smaller, red larger
+  guides(color = FALSE, size = FALSE) +                             # Size legend removed
+  geom_point(aes(y = predicted), shape = 1) +
+  theme_bw()
+
+summary(IVD_lm)
+
+
+```
+
+
+```{r Scale IVD to Specimen Length}
+combined_data <- 
+  combined_data %>%
+  mutate(scaled_ivd = mean_intervertebral_distance - (mean_ln_standard_length - mean_intervertebral_distance)) #log-log measures log(a) - log(b) = log(a/b)
+
+#double check that they no longer correlate:
+scaled_ivd_test_model <- 
+  lm(data=combined_data, scaled_ivd ~ mean_ln_standard_length)
+summary(scaled_ivd_test_model)
+
+
+IV_distance_model <- fit_pgls_models(vcv_matrix, "scaled_fishlength_meanIVdistances", "mean_ln_standard_length")
+saveRDS(vertebral_and_body_aspect_ratio, 'Data/Iv_standard_length.rds')
+summary(IV_distance_model)
+coef(scaled_ivd_test_model)[2]
+
+#plot the relationship
+a2 <- ggplot(combined_data, aes(x=mean_ln_standard_length, y=scaled_ivd))+
+geom_point(aes(colour = ecomorphology), size = 3.00)+ 
+   geom_abline(intercept=scaled_ivd_test_model$coefficients[[1]], 
+              slope = scaled_ivd_test_model$coefficients[[2]], 
+              size = 0.75, colour = 'black', linetype = 'solid') +
+    geom_abline(intercept = IV_distance_model$model_fits[[3]]$model$coef[[1]], 
+              slope = IV_distance_model$model_fits[[3]]$model$coef[[2]], 
+              size = 0.75, colour = 'red', linetype = 'dashed')+
+    ylab("mean ln[Scaled Intervertebral Distance]")+
+  xlab("mean ln[Specimen Length]")+
+    ggtitle("Scaled IVD ~ Specimen Length (R^2=0.98, m=1.021676 , p=<0.001)") +# PGLS is red
+  theme_classic()
+a2
+
+# let go added PGLS fit - time ti add better lables and headers and things
+
+ggsave("Figures/vertebral_aspect_ratio_body_aspect_ratio.jpeg", a2, width = 20, height = 15, units = "cm")
+
+```
+
+```{r Construct New VCV Matrix for PGLS Models}
+#construct the variance-covariance (VCV) matrix:
+vcv_matrix <- caper::comparative.data(pruned_tree, combined_data, species_name, vcv=TRUE, vcv.dim=3)
+```
+
+```{r Scaled IVD ~ Total Count}
+#IVD ~ total count
+IVD_total_count <- 
+  fit_pgls_models(vcv_matrix, "scaled_ivd", "total_count")
+saveRDS(IVD_total_count, 'Data/IVD_total_count.rds')
+
+#summarise OLS and best fitting PGLS model
+summary(IVD_total_count$model_fits[[1]]) #OLS
+summary(IVD_total_count$model_fits[[3]]) #PGLS but indistinguishable from OLS model
+
+combined_data
+
+#scatterplot of scaled IVD and total vertebral counts
+a3 <- ggplot(combined_data, aes(x=total_count, y=scaled_ivd))+
+geom_point(aes(colour = ecomorphology), size = 3.00)+ 
+     scale_fill_manual(values = c(
+    "astatotilapia" = "#E87D72",
+    "rhamphochromis" = "#51B3E6",
+    "diplotaxodon" = "grey",
+    "deep benthic" = "#BD9C33",
+    "shallow benthic" = "#A18BF8",
+    "utaka" = "#FC61D7",
+    "mbuna" = "#00C095"
+  ))+
+  geom_abline(intercept=IVD_total_count$model_fits[[1]]$coefficients[[1]], 
+              slope = IVD_total_count$model_fits[[1]]$coefficients[[2]], 
+              size = 0.75, colour = 'black', linetype = 'solid')+ #OLS is black
+  geom_abline(intercept = IVD_total_count$model_fits[[3]]$model$coef[[1]], 
+              slope = IVD_total_count$model_fits[[3]]$model$coef[[2]], 
+              size = 0.75, colour = 'red', linetype = 'dashed') + #PGLS is red
+  xlab("ln[Total Count]")+
+  ylab("Mean ln[Intervertebral Distance] (Scaled)")+
+  ggtitle("Scaled IVD ~ Total Count (R^2=0.07, m=-4.164, p=0.083, n.s.)") +
+  theme_classic()+
+  theme(legend.position = 'right')+
+  theme(plot.title = element_text(colour = "red"))
+a3
+```
+
+#Precaudal and Caudal Intervertebral Distances
+
+```{r Convert IVD Data to Long Format}
+#convert into long format for easier plotting/stat analysis
+intervertebral_distances_species_long <-
+  intervertebral_distances_species %>%
+   pivot_longer(
+    cols = precaudal_intervertebral_distance:mean_intervertebral_distance, 
+    names_to = "domain", 
+    values_to = "distances"
+  ) %>%
+  mutate(domain = case_when(
+    domain == "precaudal_intervertebral_distance" ~ "precaudal",
+    domain == "caudal_intervertebral_distance" ~ "caudal",
+    domain == "mean_intervertebral_distance" ~ "mean"
+  ))
+```
+
+```{r Boxplot of Precaudal and Caudal Intervertebral Distances}
+#remove means (i.e. mean of precaudal + caudal)
+intervertebral_distances_species_precaudal_caudal <- 
+  intervertebral_distances_species_long %>%
+  filter(domain != 'mean')
+
+#recode and reorder domain names to make them nicer and display them in correct order
+intervertebral_distances_species_precaudal_caudal$domain <- dplyr::recode(intervertebral_distances_species_precaudal_caudal$domain,
+                                                  "caudal" = "Caudal",
+                                                  "precaudal" = "Precaudal")
+intervertebral_distances_species_precaudal_caudal$domain <- factor(intervertebral_distances_species_precaudal_caudal$domain, 
+                                                  levels = c("Precaudal", "Caudal"))
+
+set.seed(1931) #for geom_jitter
+
+#plot precaudal and caudal vertebral aspect ratios (boxplot)
+a1 <- ggplot(intervertebral_distances_species_precaudal_caudal, aes(x=domain, y=distances))+
+ geom_boxplot(outlier.shape = NA) +
+  stat_summary(fun = mean, geom = "point", shape = 4, colour = 'red', size = 5) +
+  xlab("Vertebral Identity") +
+  ylab("Mean ln[Intervertebral Distances]") + #more negative means shorter distance
+  geom_jitter(aes(colour = species_name), size = 2.00)+
+  theme_classic()+
+  theme(legend.position = 'none')
+a1
+
+ggsave("Figures/intervertebral_distances_species_precaudal_caudal_boxplot.pdf", a1, width = 10, height = 10, units = "cm")
+
+
+#plot precaudal and caudal vertebral aspect ratios (dotplot with species connected by lines)
+a2 <- ggplot(intervertebral_distances_species_precaudal_caudal, aes(x = domain, y = distances, colour = species_name)) +
+  geom_point(size = 3)+
+  geom_line(aes(group = species_name), size = 1, alpha = 0.7)+  #connect species with lines
+  xlab("Vertebral Identity")+
+  ylab("Mean ln[Intervertebral Distances]")+ 
+  theme_classic()+
+  theme(legend.position = 'none')
+a2
+
+ggsave("Figures/intervertebral_distances_species_precaudal_caudal_dotplot.pdf", a2, width = 10, height = 10, units = "cm")
+
+```
+
+```{r Are Precaudal and Caudal IVDs Sig Diff?}
+#t_test to check whether diff between pc and c might be sig. (no phylogenetic correction)
+t_test_iv_distances <- t.test(
+  distances ~ domain, 
+  data = intervertebral_distances_species_precaudal_caudal
+)
+t_test_iv_distances #t = 0.24165, df = 85.579, p-value = 0.8096
+```
+
+## doing some morphospace - to look at differneces in differnece based on ecological groups 
+
+```{r Filter Species Data}
+#since we already have a pruned tree:
+species_data_filtered <- subset(species_data, species_name %in% pruned_tree$tip.label)
+
+#note not all species will be represented, we have shape data for some deep benthics that I didn't initially have count data for.
+```
+
+
+### box plotting the species means etc
+
+```{r}
+# splitting into caudal and precaudal actually
+precaudal_data_iv <- intervertebral_distances[,c("individual", "species_name", "precaudal_intervertebral_distance")]
+precaudal_data_iv<- precaudal_data_iv[-c(31,32,33, 34, 35, 36, 37, 38, 39, 40, 41,42,43,44),]
+
+caudal_data_iv <- intervertebral_distances[,c("individual", "species_name", "caudal_intervertebral_distance")]
+caudal_data_iv<- caudal_data_iv[-c(31,32,33, 34, 35, 36, 37, 38, 39, 40, 41,42,43,44),]
+```
+
+
+```{r}
+# widths combo for caudal
+# Load data
+widths_data <- read.csv('Data/species_data.csv')
+
+# Check species names for inconsistencies
+unique(widths_data$species_name)
+unique(caudal_data_iv$species_name)
+
+# Standardize species names by trimming spaces and making them lowercase
+widths_data$species_name <- trimws(tolower(widths_data$species_name))
+caudal_data_iv$species_name <- trimws(tolower(caudal_data_iv$species_name))
+
+# Fix missing columns (if necessary)
+missing_in_widths <- setdiff(colnames(caudal_data_iv), colnames(widths_data))
+missing_in_caudal <- setdiff(colnames(widths_data), colnames(caudal_data_iv))
+
+for (col in missing_in_widths) {
+  widths_data[[col]] <- caudal_data_iv[[col]][1]
+}
+for (col in missing_in_caudal) {
+  caudal_data_iv[[col]] <- widths_data[[col]][1]
+}
+
+# Merge datasets
+caudal_combo <- rbind(widths_data, caudal_data_iv)
+
+# Check if species names are aligned correctly
+caudal_combo %>%
+  group_by(species_name) %>%
+  summarize(count = n())
+
+# Create the absolute caudal intervertebral distance column
+caudal_combo <- caudal_combo %>%
+  mutate(abs_caudal_intervertebral_distance = abs(caudal_intervertebral_distance))
+
+caudal_combo
+
+widths_data$species_name <- trimws(tolower(widths_data$species_name))
+caudal_data_iv$species_name <- trimws(tolower(caudal_data_iv$species_name))
+
+# Perform the merge using left join (keeps all rows from widths_data)
+caudal_combo <- left_join(widths_data, caudal_data_iv, by = "species_name")
+table(caudal_combo$species_name)
+
+caudal_combo
+# Create the absolute caudal intervertebral distance column
+caudal_combo <- caudal_combo %>%
+  mutate(abs_caudal_intervertebral_distance = abs(caudal_intervertebral_distance.x))
+
+# View the merged data
+names(caudal_combo) <- gsub("\\.x$", "", names(caudal_combo))
+names(caudal_combo) <- gsub("\\.y$", "", names(caudal_combo))
+caudal_combo <- caudal_combo[, -c(13, 17, 18, 19, 20, 21, 22, 23, 24, 24, 26)] 
+caudal_combo <- caudal_combo[, -c(13,15,16)] 
+```
+
+```{r}
+# widths combo for precaudal
+
+widths_data<- read.csv('Data/species_data.csv')
+colnames(widths_data)
+colnames(precaudal_data_iv)
+
+missing_in_widths <- setdiff(colnames(precaudal_data_iv), colnames(widths_data))
+missing_in_precaudal <- setdiff(colnames(widths_data), colnames(precaudal_data_iv))
+
+for (col in missing_in_widths) {
+  widths_data[[col]] <- precaudal_data_iv[[col]][1]
+}
+for (col in missing_in_precaudal) {
+  precaudal_data_iv[[col]] <- widths_data[[col]][1] 
+}
+precaudal_combo <- rbind(widths_data, precaudal_data_iv)
+precaudal_combo <- as.data.frame(precaudal_combo)
+
+precaudal_combo <- precaudal_combo %>%
+  mutate(abs_precaudal_intervertebral_distance = abs(precaudal_intervertebral_distance))
+
+precaudal_combo
+# okay perf time to combine some data 
+
+widths_data$species_name <- trimws(tolower(widths_data$species_name))
+precaudal_data_iv$species_name <- trimws(tolower(precaudal_data_iv$species_name))
+
+# Perform the merge using left join (keeps all rows from widths_data)
+precaudal_combo <- left_join(widths_data, precaudal_data_iv, by = "species_name")
+table(precaudal_combo$species_name)
+
+precaudal_combo
+# Create the absolute caudal intervertebral distance column
+precaudal_combo <- precaudal_combo %>%
+  mutate(abs_precaudal_intervertebral_distance = abs(precaudal_intervertebral_distance.x))
+
+# View the merged data
+
+names(precaudal_combo) <- gsub("\\.x$", "", names(precaudal_combo))
+names(precaudal_combo) <- gsub("\\.y$", "", names(precaudal_combo))
+precaudal_combo <- precaudal_combo[, -c(13, 17, 18, 19, 20, 21, 22, 23, 24, 24, 26)] 
+precaudal_combo <- precaudal_combo[, -c(13,15,16)] 
+```
+
+## preparing to log
+```{r}
+CCABS<- abs(caudal_combo$caudal_intervertebral_distance)
+caudal_combo$caudal_intervertebral_distance <- CCABS
+```
+
+```{r}
+PCABS<- abs(precaudal_combo$precaudal_intervertebral_distance)
+precaudal_combo$precaudal_intervertebral_distance <- PCABS
+```
+
+## Yippee time to log transform
+
+```{r}
+caudal_combo$log_caudal_intervertebral_distance <- log(caudal_combo$caudal_intervertebral_distance)
+precaudal_combo$log_precaudal_intervertebral_distance <- log(precaudal_combo$precaudal_intervertebral_distance)
+```
+
+## have the log co,umn time to plot holy hell 
+
+```{r}
+AR <- read.csv('Data/vertebral_aspect_ratios.csv')
+SL <- read.csv('Data/specimen_lengths.csv')
+
+precaudal_combo$ln_standard_length <- SL$ln_standard_length
+caudal_combo$ln_standard_length <-SL$ln_standard_length
+```
+
+```{r}
+ggplot(caudal_combo, aes(x=ln_standard_length, y=
+log_caudal_intervertebral_distance)) + 
+  geom_point()
+
+ggplot(precaudal_combo, aes(x=ln_standard_length, y=
+log_precaudal_intervertebral_distance)) + 
+  geom_point()
+
+# we got somthing here - can add other means of things to work ut yaya 
+```
+
+
+# fish lengths against intervertebral distances
+
+
+```{r}
+# boxplot - logged
+P <- ggplot(precaudal_combo, aes(x = ecomorphology, y = log_precaudal_intervertebral_distance, colour = ecomorphology))+
+  geom_boxplot()+
+  geom_jitter()
+
+C <- ggplot(caudal_combo, aes(x = ecomorphology, y = log_caudal_intervertebral_distance, colour = ecomorphology))+
+  geom_boxplot()+
+  geom_jitter()
+
+P
+C
+```
+
+```{r}
+# Trying it again with no logs for the intervertebral distances
+P2 <- ggplot(precaudal_combo, aes(x = ecomorphology, y = precaudal_intervertebral_distance, colour = ecomorphology))+
+  geom_boxplot()+
+  geom_jitter()
+
+C2 <- ggplot(caudal_combo, aes(x = ecomorphology, y = caudal_intervertebral_distance, colour = ecomorphology))+
+  geom_boxplot()+
+  geom_jitter()
+
+intervertebral_distances
+
+P2
+C2
+
+```
+
+```{r}
+# variance aorund the mean 
+caudal_mean<- caudal_combo$caudal_intervertebral_distance%>%
+  na.omit(caudal_mean)
+precaudal_mean <- precaudal_combo$precaudal_intervertebral_distance%>%
+  na.omit(precaudal_mean)
+
+library(tidyverse)
+
+caudal2 <- caudal_combo %>%
+  dplyr::select(ecomorphology, caudal_intervertebral_distance, log_caudal_intervertebral_distance)%>%
+  na.omit(caudal2)
+precaudal2 <- precaudal_combo %>%
+  dplyr::select(ecomorphology, precaudal_intervertebral_distance, log_precaudal_intervertebral_distance)%>%
+  na.omit(precaudal2)
+
+
+var(caudal_mean)
+var(precaudal_mean)
+sd(caudal_mean)
+sd(precaudal_mean)
+```
+
+
+```{r}
+#ANOVA of precaudal and caudal variationa round mean baased on ecomorphology  
+# aim of ANOVA - to study if measuements are similar acors smodlaities of a caterogiral vairable
+# compare the impact of differnet levels of catergorical vairable on a quantative variable
+# and explain a quantative variable based on a qualatative
+
+# is intervertabral distance significantly different between the different ecomorphological groups ?
+
+library(car)
+library(ggpubr)
+# checking normality
+hist(caudal2$caudal_intervertebral_distance)
+hist(precaudal2$precaudal_intervertebral_distance)
+ggqqplot(caudal2$caudal_intervertebral_distance)
+ggqqplot(precaudal2$precaudal_intervertebral_distance)
+```
+
+```{r}
+ggdensity(caudal2, x = "caudal_intervertebral_distance", fill = "lightgray", title = "CONT") +
+  scale_x_continuous() +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+
+ggdensity(precaudal2, x = "precaudal_intervertebral_distance", fill = "lightgray", title = "CONT") +
+  scale_x_continuous() +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+
+```
+
+```{r}
+caudal2$log_caudal_intervertebral_distance<-log10(max(caudal2$caudal_intervertebral_distance+1)- caudal2$caudal_intervertebral_distance)
+
+
+precaudal2$log_precaudal_intervertebral_distances <- log10(precaudal2$precaudal_intervertebral_distance)
+
+ggdensity(caudal2, x = "log_caudal_intervertebral_distance", fill = "lightgray", title = "CONT") +
+  scale_x_continuous() +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+
+ggdensity(precaudal2, x = "log_precaudal_intervertebral_distance", fill = "lightgray", title = "CONT") +
+  scale_x_continuous() +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+
+```
+
+
+refixed trees to match
+## loading trees
+```{r}
+
+#import all species data
+tree <- all_species_data$tree
+
+#sort out species names to match phylogeny
+combined_data$species_name <- gsub('_', " ", combined_data$species_name)
+
+#filter out hybrids and Astatotilapia sp. 'Ruaha blue'
+combineddata_species_filtered <- 
+  combined_data %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'M zebra', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis'))
+tree$tip.label <- gsub("Astatotilapia sp. Ruaha Blue", "Astatotilapia sp Ruaha Blue", tree$tip.label)
+
+combineddata_species_filtered$species_name <- trimws(combineddata_species_filtered$species_name)
+tree$tip.label <- trimws(tree$tip.label)
+combineddata_species_filtered <- combineddata_species_filtered[combineddata_species_filtered$species_name %in% tree$tip.label, ]
+
+#prune the phylogenetic tree
+pruned_tree <- keep.tip(tree, combineddata_species_filtered$species_name)
+```
+
+```{r}
+combineddata_species_filtered <- combined_data %>%
+  left_join(species_data_filtered %>% dplyr::select(species_name, ecomorphology, depth_preference, piscivore), 
+            by = "species_name")
+combineddata_species_filtered <- combined_data %>%
+  left_join(species_data_filtered %>% dplyr::select(species_name, ecomorphology, depth_preference, piscivore), 
+            by = "species_name")
+
+combineddata_species_filtered$ln_precaudal_intervertebral_distance <- log(abs(combineddata_species_filtered$precaudal_intervertebral_distance))
+
+# For caudal_intervertebral_distance
+combineddata_species_filtered$ln_caudal_intervertebral_distance <- log(abs(combineddata_species_filtered$caudal_intervertebral_distance))
+
+# For mean_intervertebral_distance
+combineddata_species_filtered$ln_mean_intervertebral_distance <- log(abs(combineddata_species_filtered$mean_intervertebral_distance))
+
+# View the updated dataframe
+head(combineddata_species_filtered)
+```
+
+# Phylo ANOVA for ecomorphology and interspecies differneces 
+# look at caudal, precaudal and mean 
+
+```{r}
+# caudal comparison
+x <- combineddata_species_filtered$ecomorphology
+y <- combineddata_species_filtered$ln_caudal_intervertebral_distance
+
+eco_caudal_phy_aov <- phylANOVA(pruned_tree, x, y,
+ nsim=1000, posthoc=TRUE, p.adj="holm")
+eco_caudal_phy_aov
+
+# precaudal comparison
+x <- combineddata_species_filtered$ecomorphology
+y <- combineddata_species_filtered$ln_precaudal_intervertebral_distance
+
+eco_precaudal_phy_aov <- phylANOVA(pruned_tree, x, y,
+ nsim=1000, posthoc=TRUE, p.adj="holm")
+eco_precaudal_phy_aov
+
+
+# mean comparison
+x <- combineddata_species_filtered$ecomorphology
+y <- combineddata_species_filtered$ln_mean_intervertebral_distance 
+
+eco_mean_phy_aov<- phylANOVA(pruned_tree, x, y,
+ nsim=1000, posthoc=TRUE, p.adj="holm")
+eco_mean_phy_aov
+
+# coolio - are all my trees and tips ordered etc
+```
+
+
+## investigating some more vairbales - piscovory and depth/habotat preference
+
+```{r}
+combined_data <- species_data %>%
+  dplyr::select(species_name, depth_preference, piscivore) %>%
+  left_join(
+    intervertebral_distances_species %>%
+      dplyr::select(species_name, precaudal_intervertebral_distance, caudal_intervertebral_distance, mean_intervertebral_distance),
+    by = "species_name"
+  )
+
+# adding the random misisng data by hand - this could potentially have an effect on the other stuff I am looking at and working on
+
+combined_data <- combined_data %>%
+  mutate(
+    precaudal_intervertebral_distance = ifelse(
+      species_name == "Astatotilapia sp Ruaha Blue", -1.979503456
+, precaudal_intervertebral_distance
+    ),
+    caudal_intervertebral_distance = ifelse(
+      species_name == "Astatotilapia sp Ruaha Blue", -2.930172011
+, caudal_intervertebral_distance
+    ),
+    precaudal_intervertebral_distance = ifelse(
+      species_name == "Tramitichromis brevis", -2.568618901
+, precaudal_intervertebral_distance
+    ),
+    caudal_intervertebral_distance = ifelse(
+      species_name == "Tramitichromis brevis", -2.846576424
+,caudal_intervertebral_distance
+    ),
+    caudal_intervertebral_distance = ifelse(
+      species_name == "Aulonocara nyassae", -3.275292891
+,caudal_intervertebral_distance
+    ),
+    precaudal_intervertebral_distance = ifelse(
+      species_name == "Aulonocara nyassae",  -2.903708597
+,precaudal_intervertebral_distance
+    ),
+    precaudal_intervertebral_distance = ifelse(
+      species_name == "Stigmatochromis macrorhynchos", -1.929732463
+,precaudal_intervertebral_distance
+    ),
+   caudal_intervertebral_distance = ifelse(
+      species_name == "Stigmatochromis macrorhynchos", -2.604073859
+,caudal_intervertebral_distance
+)
+  )
+
+combined_data
+```
+
+## adding some logs to the combined data 
+```{r}
+# caudal2$log_caudal_intervertebral_distance<-log10(max(caudal2$caudal_intervertebral_distance+1)- caudal2$caudal_intervertebral_distance)
+
+hist(combined_data$mean_intervertebral_distance)
+  
+combined_data <- combined_data %>%
+  left_join(species_data_filtered %>% dplyr::select(species_name, ecomorphology), by = "species_name")
+
+combined_data[sapply(combined_data, is.numeric)] <- abs(combined_data[sapply(combined_data, is.numeric)])
+
+combined_data$ln_mean_iv_distances <- log(combined_data$mean_intervertebral_distance)
+combined_data$ln_caudal_distances <- log(combined_data$caudal_intervertebral_distance)
+combined_data$ln_precaudal_distances <- log(combined_data$precaudal_intervertebral_distance)
+
+
+
+ggdensity(combined_data, x = "ln_mean_iv_distances", fill = "lightgray", title = "CONT") +
+  scale_x_continuous() +
+  stat_overlay_normal_density(color = "red", linetype = "dashed")
+```
+
+
+
+
+
+yippee what can i do with this ocmbined data now - re runing as a phylo anova
+```{r}
+# box plots for intervertebral distance and depth preference 
+P <- ggplot(combined_data, aes(x = depth_preference, y = ln_caudal_distances, colour = depth_preference))+
+  geom_boxplot()+
+  geom_jitter()+
+    stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black")
+P
+P2 <- ggplot(combined_data, aes(x = depth_preference, y = ln_precaudal_distances, colour = depth_preference))+
+  geom_boxplot()+
+  geom_jitter()+
+    stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black")
+P2
+P3 <- ggplot(combined_data, aes(x = depth_preference, y = ln_mean_iv_distances , colour = depth_preference))+
+  geom_boxplot()+
+  geom_jitter()+
+    stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black")
+P3
+```
+
+## Phylo ANOVA for depth preference
+```{r}
+
+#caudal comparison
+x <- combineddata_species_filtered$depth_preference
+y <- combineddata_species_filtered$ln_caudal_intervertebral_distance
+
+caudal_phy_aov <- phylANOVA(pruned_tree, x, y,
+ nsim=10000, posthoc=TRUE, p.adj="holm")
+caudal_phy_aov
+
+# precaudal comparison
+x <- combineddata_species_filtered$depth_preference
+y <- combineddata_species_filtered$ln_precaudal_intervertebral_distance
+
+precaudal_phy_aov <- phylANOVA(pruned_tree, x, y,
+ nsim=10000, posthoc=TRUE, p.adj="holm")
+precaudal_phy_aov
+
+# mean comparison
+x <- combineddata_species_filtered$depth_preference
+y <- combineddata_species_filtered$ln_mean_intervertebral_distance
+
+mean_phy_aov<- phylANOVA(pruned_tree, x, y,
+ nsim=10000, posthoc=TRUE, p.adj="holm")
+mean_phy_aov
+```
+
+
+## Phylo ANOVA for piscivory
+
+```{r}
+#caudal comparison
+x <- combineddata_species_filtered$piscivore
+y <- combineddata_species_filtered$ln_caudal_intervertebral_distance
+
+caudal_phy_aov <- phylANOVA(pruned_tree, x, y,
+ nsim=1000, posthoc=TRUE, p.adj="holm")
+caudal_phy_aov
+
+# precaudal comparison
+x <- combineddata_species_filtered$piscivore
+y <- combineddata_species_filtered$ln_precaudal_intervertebral_distance
+
+precaudal_phy_aov <- phylANOVA(pruned_tree, x, y,
+ nsim=1000, posthoc=TRUE, p.adj="holm")
+precaudal_phy_aov
+
+# mean comparison
+x <- combineddata_species_filtered$piscivore
+y <- combineddata_species_filtered$ln_mean_intervertebral_distance
+
+mean_phy_aov<- phylANOVA(pruned_tree, x, y,
+ nsim=1000, posthoc=TRUE, p.adj="holm")
+mean_phy_aov
+```
+
+
+
+# lookin at psicivory now
+```{r}
+x <- ggplot(combined_data, aes(x = piscivore, y = ln_precaudal_distances, colour = piscivore))+
+  geom_boxplot()+
+  geom_jitter()+
+    stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black")
+x
+y2 <- ggplot(combined_data, aes(x = piscivore, y = ln_caudal_distances, colour = piscivore))+
+  geom_boxplot()+
+  geom_jitter()+
+    stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black")
+y2
+
+x3 <- ggplot(combined_data, aes(x = piscivore, y = ln_mean_iv_distances , colour = piscivore))+
+  geom_boxplot()+
+  geom_jitter()+
+  stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black")
+x3
+```
+
+
+
+```{r}
+combined_data <- na.omit(combined_data)
+combined_data
+
+mean_ln_fishlengths<- dplyr::select(specimen_lengths_species, species_name, mean_ln_standard_length)
+  
+mean_ln_iv_lengths <- dplyr::select(combined_data, species_name, ln_mean_iv_distances, piscivore, depth_preference)
+
+combined_data
+
+standard_data <- merge(mean_ln_fishlengths, mean_ln_iv_lengths, by='species_name')
+
+standard_data$standard_avg <- standard_data$ln_mean_iv_distances/standard_data$mean_ln_standard_length
+
+smth  <- species_data %>%
+  group_by(species_name) %>%
+  filter(!species_name %in% c('Astatotilapia sp', 'Aulonocara nyassae', 'Stigmatochromis macrorhynchos', 'Tramitichromis brevis'))
+
+smth<-na.omit(smth)
+
+standard_data$ecomorphology <- smth$ecomorphology
+# okay yay now to plot this on a box plot
+```
+
+```{r}
+# want mean IV lengths/the overall fish length - creates standardised lengths
+
+ggplot(standard_data, aes(x = mean_ln_standard_length, y=ln_mean_iv_distances)) +
+  geom_point() + 
+geom_point()+
+  geom_smooth(method=lm)
+
+standard_data
+
+P <- ggplot(standard_data, aes(x =ecomorphology , y = ln_mean_iv_distances, colour = ecomorphology))+
+  geom_boxplot()+
+  geom_jitter()
+P
+P <- ggplot(standard_data, aes(x =ecomorphology , y = mean_ln_standard_length, colour = ecomorphology))+
+  geom_boxplot()+
+  geom_jitter()
+P
+
+```
+
+# okay nice lets
