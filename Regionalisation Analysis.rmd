@@ -1,0 +1,614 @@
+---
+title: "Regionalisation Analysis"
+author: "Callum Bucklow"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries}
+require(dplyr) #for manipulation of dataframes
+require(stringr) #for useful string codes
+require(geomorph) #for geometric morphometric analysis
+require(ape)
+require(ggplot2)
+require(caper)
+require(MorphoRegions)
+```
+
+```{r Import Data}
+vertebrae <- readland.tps('Data/Vertebrae.tps',
+                              specID = c("ID"))
+```
+
+```{r Split into Multiple Species}
+
+#Extract species names (Genus_species) note that the index will be preserved for splitting the array
+specimen_names <- dimnames(vertebrae)[[3]]
+species_names <- gsub("^([A-Za-z]+_[A-Za-z]+).*", "\\1", specimen_names)
+
+#find unique Genus_species names
+unique_species <- unique(species_names)
+
+# Initialize a list to store the resulting arrays
+split_arrays <- list()
+
+# Loop over each unique species and extract the data for that species
+for (species in unique_species) {
+  species_indices <- which(species_names == species)
+  split_arrays[[species]] <- vertebrae[, , species_indices]
+}
+
+#split the array into entries for each species
+
+#initialize a list to store the arrays for each species
+species_arrays_list <- list()
+
+#loop over each unique species
+for (species in unique_species) {
+  #extract the corresponding array for each species
+  species_arrays_list[[species]] <- split_arrays[[species]]
+}
+
+# Example species_arrays_list
+# species_arrays_list <- list(Astatotilapia_calliptera = arr_1, Astatotilapia_another_species = arr_2, ...)
+
+# Function to reorder an array based on version numbers in the species names
+reorder_array <- function(arr, species_names) {
+  # Extract version numbers from the species names
+  version_numbers <- as.numeric(gsub(".*_v(\\d+)$", "\\1", species_names))
+  
+  # Get the order of the species based on version numbers in ascending order
+  sorted_order <- order(version_numbers)
+  
+  # Reorder the array based on the sorted order
+  reordered_arr <- arr[, , sorted_order]
+  
+  return(reordered_arr)
+}
+
+# Initialize a new list to store the reordered arrays
+reordered_species_arrays_list <- list()
+
+# Loop over each species in the original list
+for (species in names(species_arrays_list)) {
+  # Get the array for the current species
+  current_arr <- species_arrays_list[[species]]
+  
+  # Get the species names (dimnames)
+  species_names <- dimnames(current_arr)[[3]]
+  
+  # Reorder the current array based on the version numbers
+  reordered_species_arrays_list[[species]] <- reorder_array(current_arr, species_names)
+}
+
+#individual species entries can be accessed like this:
+#reordered_species_arrays_list$Astatotilapia_calliptera
+```
+
+# Astatotilapia Calliptera
+
+```{r Procrustes Superimpostion on Vertebral Landmark Coordinates (Astatotilapia calliptera)}
+#Generalized procrustes analysis to superimose raw coordinate data (A. calliptera)
+astatotilapia_callipter_proc <- gpagen(reordered_species_arrays_list$A_Calliptera, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+#New PCA function
+a_calliptera_PCA <- gm.prcomp(astatotilapia_callipter_proc$coords)
+summary(a_calliptera_PCA)
+plot(a_calliptera_PCA , main="Astatotilapia calliptera PCA", axis1=1, axis2=2, type="b", pch=19)
+```
+
+```{r Prepare PCA Data for MorphoRegion (Astatotilapia calliptera)}
+
+AC_pc_scores <- as.data.frame(a_calliptera_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+AC_pc_scores <- AC_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(AC_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(AC_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Astatotilapia calliptera)}
+#Process PC data for MorphoRegions
+astatotilapia_calliptera <- process_measurements(AC_pc_scores, pos = 1)
+astatotilapia_calliptera_pco <- svdPCO(astatotilapia_calliptera, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(astatotilapia_calliptera_pco, 1:5)
+```
+
+```{r Determine number of PCOs to Retain (Astatotilapia calliptera)}
+#define number of PCOs to retain - just 5 since we input 5 PC axes
+PCOs <- PCOselect(astatotilapia_calliptera_pco, method = "manual",
+                  scores = 5)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Astatotilapia calliptera)}
+
+astatotilapia_calliptera_regionresults <- calcregions(astatotilapia_calliptera_pco, scores = PCOs, noregions = 8,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 26 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(astatotilapia_calliptera_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r Plotting PCOs and Best Fitting Model (Astatotilapia calliptera)}
+#Plot regressions for best model:
+plotsegreg(astatotilapia_calliptera_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "aic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+
+#Plot regressions for best fitting model with the break points:
+#plotsegreg(astatotilapia_calliptera_pco, scores = 1, #limit this to just PCO 1
+           #bps = c(5, 8, 15, 24),
+           #cont = TRUE)
+```
+
+```{r}
+# making a visual map
+regionresults <- calcregions(astatotilapia_calliptera_pco, scores = 1:27, noregions = 6, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 5,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(astatotilapia_calliptera_pco, name = "A_calliptera",
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(astatotilapia_calliptera_pco, name = "A_calliptera",
+           bpvar = bpvar, dropNA = TRUE)
+```
+
+# Maylandia zebra
+
+```{r Procrustes Superimpostion on Vertebral Landmark Coordinates (Maylandia zebra)}
+#Generalized procrustes analysis to superimose raw coordinate data (A. calliptera)
+maylandia_zebra_proc <- gpagen(reordered_species_arrays_list$Poseidon_v, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+#New PCA function
+maylandia_zebra_PCA <- gm.prcomp(maylandia_zebra_proc$coords)
+summary(maylandia_zebra_PCA)
+plot(maylandia_zebra_PCA, main="Maylandia zebra PCA", axis1=1, axis2=2, type="b", pch=19)
+```
+
+```{r Prepare PCA Data for MorphoRegion (Maylandia zebra)}
+
+MZ_pc_scores <- as.data.frame(maylandia_zebra_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+MZ_pc_scores <- MZ_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(MZ_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(MZ_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Maylandia zebra)}
+#Process PC data for MorphoRegions
+maylandia_zebra <- process_measurements(MZ_pc_scores, pos = 1)
+maylandia_zebra_pco <- svdPCO(maylandia_zebra, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(maylandia_zebra_pco, 1:5)
+```
+
+```{r Determine number of PCOs to Retain (Maylandia zebra)}
+#define number of PCOs to retain - just 5 since we input 5 PC axes
+PCOs <- PCOselect(maylandia_zebra_pco, method = "manual",
+                  scores = 5)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Maylandia zebra)}
+
+maylandia_zebra_regionresults <- calcregions(maylandia_zebra_pco, scores = PCOs, noregions = 8,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(maylandia_zebra_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r Plotting PCOs and Best Fitting Model (Maylandia zebra)}
+#Plot regressions for best model:
+plotsegreg(maylandia_zebra_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "bic",
+           model = 1
+           ) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+```
+
+```{r}
+regionresults <- calcregions(maylandia_zebra_pco, scores = 1:28, noregions = 5, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 5,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(maylandia_zebra_pco, name = "Maylandia Zebra",
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(maylandia_zebra_pco, name = "Maylandia Zebra",
+           bpvar = bpvar, dropNA = TRUE)
+```
+
+
+
+### Copadichromis quadrimaculatus
+
+```{r}
+#Generalized procrustes analysis to superimose raw coordinate data (A. calliptera)
+copadichromis_quadrimaculatus_proc <- gpagen(reordered_species_arrays_list$Copadichromis_quadrimaculatus, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+#New PCA function
+c_quadrimaculatus_PCA <- gm.prcomp(copadichromis_quadrimaculatus_proc$coords)
+summary(c_quadrimaculatus_PCA)
+plot(c_quadrimaculatus_PCA , main="Copadichromis quadrimaculatus PCA", axis1=1, axis2=2, type="b", pch=19)
+
+# interesting
+
+```
+
+
+```{r Prepare PCA Data for MorphoRegion (Copadichromis quadrimaculatus)}
+
+CQ_pc_scores <- as.data.frame(c_quadrimaculatus_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+CQ_pc_scores <- CQ_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(CQ_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(CQ_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Copadichromis quadrimaculatus)}
+#Process PC data for MorphoRegions
+copadichromis_quadrimaculatus <- process_measurements(CQ_pc_scores, pos = 1)
+copadichromis_quadrimaculatus_pco <- svdPCO(copadichromis_quadrimaculatus, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(copadichromis_quadrimaculatus_pco, 1:5)
+```
+
+```{r Plotting PCOs and Best Fitting Model (Copadichromis quadrimaculatus)}
+#Plot regressions for best model:
+plotsegreg(copadichromis_quadrimaculatus_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "bic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+```
+
+
+```{r Testing Number of Regions in Vertebral Column (Copadichromis quadrimaculatus)}
+
+copadichromis_quadrimaculatus_regionresults <- calcregions(copadichromis_quadrimaculatus_pco, scores = PCOs, noregions = 10,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(copadichromis_quadrimaculatus_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r}
+regionresults <- calcregions(copadichromis_quadrimaculatus_pco, scores = 1:28, noregions = 5, 
+                             minvert = 3, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 5,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(copadichromis_quadrimaculatus, name = 'Copadichromis quadrimaculatus',
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(copadichromis_quadrimaculatus, name = "Copadichromis quadrimaculatus",
+           bpvar = bpvar, dropNA = TRUE)
+
+```
+
+### Lethrinops gossei
+
+```{r}
+#Generalized procrustes analysis to superimose raw coordinate data (Lethrinops gossei)
+lethrinops_gossei_proc <- gpagen(reordered_species_arrays_list$Lethrinops_gossei, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+#New PCA function
+L_gossei_PCA <- gm.prcomp(lethrinops_gossei_proc$coords)
+summary(L_gossei_PCA)
+plot(L_gossei_PCA, main="Lethrinops gossei PCA", axis1=1, axis2=2, type="b", pch=19)
+
+
+```
+
+```{r Prepare PCA Data for MorphoRegion (Lethrinops gossei)}
+
+LG_pc_scores <- as.data.frame(L_gossei_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+LG_pc_scores <- LG_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(LG_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(LG_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Lethrinops gossei)}
+#Process PC data for MorphoRegions
+lethrinops_gossei <- process_measurements(LG_pc_scores, pos = 1)
+lethrinops_gossei_pco <- svdPCO(lethrinops_gossei, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(lethrinops_gossei_pco, 1:5)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Lethrinops gossei)}
+
+lethrinops_gossei_regionresults <- calcregions(lethrinops_gossei_pco, scores = PCOs, noregions = 10,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(lethrinops_gossei_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r Plotting PCOs and Best Fitting Model (Lethrinops gossei)}
+#Plot regressions for best model:
+plotsegreg(lethrinops_gossei_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "bic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+```
+
+
+```{r}
+regionresults <- calcregions(lethrinops_gossei_pco, scores = 1:28, noregions = 7, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 7,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(lethrinops_gossei, name = 'Lethrinops gossei',
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(lethrinops_gossei, name = "Lethrinops gossei",
+           bpvar = bpvar, dropNA = TRUE)
+
+```
+
+
+### Placidochromis johnstoni
+
+```{r}
+#Generalized procrustes analysis to superimose raw coordinate data (Placidochromis johnstoni)
+placidochromis_johnstoni <- gpagen(reordered_species_arrays_list$Placidochromis_johnstoni, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+placidochromis_johnstoni_proc <- gpagen(reordered_species_arrays_list$Placidochromis_johnstoni, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+#New PCA function
+P_johnstoni_PCA <- gm.prcomp(placidochromis_johnstoni_proc$coords)
+summary(P_johnstoni_PCA)
+plot(P_johnstoni_PCA, main="Placidochromis johnstoni PCA", axis1=1, axis2=2, type="b", pch=19)
+
+
+```
+
+```{r Prepare PCA Data for MorphoRegion (Placidochromis johnstoni)}
+
+PJ_pc_scores <- as.data.frame(P_johnstoni_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+PJ_pc_scores <- PJ_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(PJ_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(PJ_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Placidochromis johnstoni)}
+#Process PC data for MorphoRegions
+placidochromis_johnstoni <- process_measurements(PJ_pc_scores, pos = 1)
+placidochromis_johnstoni_pco <- svdPCO(placidochromis_johnstoni, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(placidochromis_johnstoni_pco, 1:5)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Placidochromis johnstoni)}
+
+placidochromis_johnstoni_regionresults <- calcregions(placidochromis_johnstoni_pco, scores = PCOs, noregions = 10,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(placidochromis_johnstoni_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r Plotting PCOs and Best Fitting Model (Placidochromis johnstoni)}
+#Plot regressions for best model:
+plotsegreg(placidochromis_johnstoni_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "bic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+```
+
+```{r}
+regionresults <- calcregions(placidochromis_johnstoni_pco, scores = 1:28, noregions = 5, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 5,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(placidochromis_johnstoni, name = 'Placidochromis johnstoni',
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(placidochromis_johnstoni, name = "Placidochromis johnstoni",
+           bpvar = bpvar, dropNA = TRUE)
+
+```
+
+
+### Rhamphochromis chilingali
+
+```{r}
+#Generalized procrustes analysis to superimose raw coordinate data (Rhamphochromis chilingali)
+rhamphochromis_chilingali <- gpagen(reordered_species_arrays_list$Rhamphochromis_sp, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+rhamphochromis_chilingali_proc <- gpagen(reordered_species_arrays_list$Rhamphochromis_sp, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+
+#New PCA function
+R_chilingali_PCA <- gm.prcomp(rhamphochromis_chilingali_proc$coords)
+summary(R_chilingali_PCA)
+plot(R_chilingali_PCA, main=" Rhamphochromis chilingali", axis1=1, axis2=2, type="b", pch=19)
+
+
+```
+
+```{r Prepare PCA Data for MorphoRegion (Rhamphochromis chilingali)}
+
+RC_pc_scores <- as.data.frame(R_chilingali_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+RC_pc_scores <- RC_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(RC_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(RC_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion (Rhamphochromis chilingali)}
+#Process PC data for MorphoRegions
+rhamphochromis_chilingali <- process_measurements(RC_pc_scores, pos = 1)
+rhamphochromis_chilingali_pco <- svdPCO(rhamphochromis_chilingali, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(rhamphochromis_chilingali_pco, 1:5)
+```
+
+```{r Plotting PCOs and Best Fitting Model (Rhamphochromis chilingali)}
+#Plot regressions for best model:
+plotsegreg(rhamphochromis_chilingali_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "bic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Rhamphochromis chilingali)}
+
+rhamphochromis_chilingali_regionresults <- calcregions(rhamphochromis_chilingali_pco, scores = PCOs, noregions = 10,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 28 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(rhamphochromis_chilingali_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r}
+regionresults <- calcregions(rhamphochromis_chilingali_pco, scores = 1:28, noregions = 5, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 5,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(rhamphochromis_chilingali, name = 'Placidochromis johnstoni',
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(rhamphochromis_chilingali, name = "Placidochromis johnstoni",
+           bpvar = bpvar, dropNA = TRUE)
+
+```
+
+## Tropheops tropheops
+
+
+```{r Procrustes Superimpostion on Vertebral Landmark Coordinates (Astatotilapia calliptera)}
+#Generalized procrustes analysis to superimose raw coordinate data (A. calliptera)
+tropheops_tropheops_proc <- gpagen(reordered_species_arrays_list$Tropheops_tropheops, Proj=TRUE, ProcD=TRUE, curves=NULL, surfaces=NULL)
+
+#New PCA function
+t_tropheops_PCA <- gm.prcomp(tropheops_tropheops_proc$coords)
+summary(t_tropheops_PCA)
+plot(t_tropheops_PCA , main="Tropheops tropheops PCA", axis1=1, axis2=2, type="b", pch=19)
+```
+
+```{r Prepare PCA Data for MorphoRegion (Tropheops tropheops)}
+
+TT_pc_scores <- as.data.frame(t_tropheops_PCA$x[,1:5]) #using PC1-PC5 as collectively explains 95.5% of variation, rest is probably noise
+
+TT_pc_scores <- TT_pc_scores %>%
+  mutate(vertebrae = as.numeric(sub(".*_v([0-9]+).*", "\\1", rownames(TT_pc_scores)))) %>%
+  dplyr::select(vertebrae, everything())
+rownames(TT_pc_scores) <- NULL
+```
+
+```{r Preparing Data for MorphoRegion ()}
+#Process PC data for MorphoRegions
+tropheops_tropheops <- process_measurements(TT_pc_scores, pos = 1)
+tropheops_tropheops_pco <- svdPCO(tropheops_tropheops, metric = 'Manhattan')
+
+#Plot PCOs along backbone for PC1 and 2:
+plot(tropheops_tropheops_pco, 1:5)
+```
+
+```{r Determine number of PCOs to Retain (Astatotilapia calliptera Tropheops tropheops)}
+#define number of PCOs to retain - just 5 since we input 5 PC axes
+PCOs <- PCOselect(tropheops_tropheops_pco, method = "manual",
+                  scores = 5)
+```
+
+```{r Testing Number of Regions in Vertebral Column (Tropheops tropheops)}
+
+tropheops_tropheops_regionresults <- calcregions(tropheops_tropheops_pco, scores = PCOs, noregions = 8,
+                             minvert = 3, cont = TRUE, 
+                             exhaus = TRUE, cl = NULL,
+                             verbose = FALSE) #we have 26 vertebrae, max number of regions is 8 (assuming 3 vertebrae per/region)
+##output summary
+models <- modelselect(tropheops_tropheops_regionresults)
+supp <- modelsupport(models)
+supp
+```
+
+```{r Plotting PCOs and Best Fitting Model (Tropheops tropheopa)}
+#Plot regressions for best model:
+plotsegreg(tropheops_tropheops_pco, scores = 1:5, #plot all retained PCOs
+           modelsupport = supp,
+           criterion = "aic",
+           model = 1) #plot best fitting model (i.e. model = 1, as determined by the BIC value)
+
+#Plot regressions for best fitting model with the break points:
+#plotsegreg(astatotilapia_calliptera_pco, scores = 1, #limit this to just PCO 1
+           #bps = c(5, 8, 15, 24),
+           #cont = TRUE)
+```
+
+```{r}
+# making a visual map
+regionresults <- calcregions(tropheops_tropheops_pco, scores = 1:27, noregions = 6, 
+                             minvert = 2, cont = TRUE, exhaus = TRUE,
+                             verbose = FALSE)
+
+bpvar <- calcBPvar(regionresults, noregions = 5,
+                   pct = 0.1, criterion = "bic")
+plotvertmap(tropheops_tropheops_pco, name = "t_tropheops",
+            modelsupport = supp, criterion = "bic", model = 1)
+
+plotvertmap(tropheops_tropheops_pco, name = "t_tropheops",
+           bpvar = bpvar, dropNA = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
